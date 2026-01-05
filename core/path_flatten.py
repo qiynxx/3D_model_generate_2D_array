@@ -30,9 +30,13 @@ class PathFlattenResult:
     distortion: Optional[np.ndarray] = None  # 变形量
 
 
-def compute_lscm_uv(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, float]:
+def compute_lscm_uv(mesh: trimesh.Trimesh, center_position: np.ndarray = None) -> Tuple[np.ndarray, float]:
     """
     使用LSCM算法计算网格的UV展开坐标
+
+    Args:
+        mesh: 网格模型
+        center_position: 中心点位置（用于确定展开方向）
 
     Returns:
         (uv_coords, scale_factor) UV坐标数组和缩放因子
@@ -47,6 +51,11 @@ def compute_lscm_uv(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, float]:
     # 找边界顶点
     boundary_vertices = find_boundary_vertices(mesh)
     print(f"  边界顶点数: {len(boundary_vertices)}")
+
+    # 如果没有边界（闭合曲面），使用基于中心点的局部展开
+    if len(boundary_vertices) < 2:
+        print(f"  检测到闭合曲面，使用局部切平面展开...")
+        return unfold_from_center(mesh, center_position)
 
     # 选择固定点 - 使用边界上距离最远的两个点
     if len(boundary_vertices) >= 2:
@@ -179,6 +188,114 @@ def compute_lscm_uv(mesh: trimesh.Trimesh) -> Tuple[np.ndarray, float]:
     print(f"  最终UV范围: X=[{uv[:,0].min():.4f}, {uv[:,0].max():.4f}], Y=[{uv[:,1].min():.4f}, {uv[:,1].max():.4f}]")
 
     return uv, scale
+
+
+def unfold_from_center(mesh: trimesh.Trimesh, center_position: np.ndarray = None) -> Tuple[np.ndarray, float]:
+    """
+    从中心点展开闭合曲面 - 使用测地线距离和角度
+
+    对于没有边界的闭合曲面，使用中心点作为参考，
+    计算每个顶点相对于中心点的测地线距离和角度来展开。
+    """
+    print(f"  使用中心点展开法...")
+
+    vertices = mesh.vertices
+    n_vertices = len(vertices)
+
+    # 如果没有提供中心点，使用网格中心
+    if center_position is None:
+        center_position = vertices.mean(axis=0)
+
+    # 找到最近中心点的顶点
+    center_distances = np.linalg.norm(vertices - center_position, axis=1)
+    center_vertex = np.argmin(center_distances)
+    center_pos = vertices[center_vertex]
+
+    # 获取中心点的法向量
+    center_normal = mesh.vertex_normals[center_vertex]
+
+    # 构建切平面坐标系
+    normal = center_normal / (np.linalg.norm(center_normal) + 1e-10)
+    if abs(normal[2]) < 0.9:
+        up = np.array([0.0, 0.0, 1.0])
+    else:
+        up = np.array([1.0, 0.0, 0.0])
+
+    x_axis = np.cross(up, normal)
+    x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-10)
+    y_axis = np.cross(normal, x_axis)
+    y_axis = y_axis / (np.linalg.norm(y_axis) + 1e-10)
+
+    print(f"  中心顶点: {center_vertex}")
+    print(f"  中心位置: {center_pos}")
+    print(f"  法向量: {normal}")
+
+    # 计算每个顶点到中心的测地线距离（使用Dijkstra）
+    geodesic_distances = compute_geodesic_distances(mesh, center_vertex)
+
+    # 计算每个顶点相对于中心的角度（投影到切平面）
+    angles = np.zeros(n_vertices)
+    for i in range(n_vertices):
+        offset = vertices[i] - center_pos
+        # 投影到切平面
+        x = np.dot(offset, x_axis)
+        y = np.dot(offset, y_axis)
+        angles[i] = np.arctan2(y, x)
+
+    # 使用极坐标展开，但使用测地线距离作为半径
+    uv = np.zeros((n_vertices, 2))
+    for i in range(n_vertices):
+        r = geodesic_distances[i]  # 使用测地线距离
+        theta = angles[i]
+        uv[i, 0] = r * np.cos(theta)
+        uv[i, 1] = r * np.sin(theta)
+
+    # 不需要额外缩放，因为测地线距离已经是真实的曲面距离
+    scale = 1.0
+
+    uv_range_x = uv[:,0].max() - uv[:,0].min()
+    uv_range_y = uv[:,1].max() - uv[:,1].min()
+    print(f"  展开范围: {uv_range_x:.4f} x {uv_range_y:.4f}")
+
+    return uv, scale
+
+
+def compute_geodesic_distances(mesh: trimesh.Trimesh, source_vertex: int) -> np.ndarray:
+    """
+    计算从源顶点到所有其他顶点的测地线距离（使用Dijkstra算法）
+    """
+    import heapq
+
+    n_vertices = len(mesh.vertices)
+    edges = mesh.edges_unique
+    edge_lengths = mesh.edges_unique_length
+
+    # 构建图
+    graph = {i: [] for i in range(n_vertices)}
+    for (v1, v2), length in zip(edges, edge_lengths):
+        graph[v1].append((v2, length))
+        graph[v2].append((v1, length))
+
+    # Dijkstra算法
+    distances = np.full(n_vertices, np.inf)
+    distances[source_vertex] = 0
+    pq = [(0.0, source_vertex)]
+    visited = set()
+
+    while pq:
+        dist, u = heapq.heappop(pq)
+        if u in visited:
+            continue
+        visited.add(u)
+
+        for v, weight in graph[u]:
+            if v not in visited:
+                new_dist = dist + weight
+                if new_dist < distances[v]:
+                    distances[v] = new_dist
+                    heapq.heappush(pq, (new_dist, v))
+
+    return distances
 
 
 def find_boundary_vertices(mesh: trimesh.Trimesh) -> np.ndarray:
@@ -453,8 +570,8 @@ def flatten_paths_with_conformal_map(
     size_3d = np.linalg.norm(bounds_3d[1] - bounds_3d[0])
     print(f"  3D模型对角线尺寸: {size_3d:.2f}")
 
-    # 计算LSCM UV坐标
-    uv_coords, scale = compute_lscm_uv(mesh)
+    # 计算LSCM UV坐标（传入中心点用于闭合曲面展开）
+    uv_coords, scale = compute_lscm_uv(mesh, center_position)
 
     # 验证UV坐标是否合理
     uv_range_x = uv_coords[:,0].max() - uv_coords[:,0].min()
