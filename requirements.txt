@@ -1,0 +1,11 @@
+pyqt5>=5.15
+pyvista>=0.43
+pyvistaqt>=0.11
+trimesh>=4.0
+numpy>=1.24
+scipy>=1.11
+potpourri3d>=0.0.8
+ezdxf>=1.1
+numpy-stl>=3.0
+networkx>=3.0
+manifold3d>=3.3.2
