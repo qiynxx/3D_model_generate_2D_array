@@ -20,7 +20,7 @@ from core.mesh_loader import MeshLoader
 from core.geodesic import PathManager, IRPoint
 from core.groove_gen import GrooveGenerator
 from core.conformal_map import ConformalMapper, FlattenResult
-from core.path_flatten import flatten_paths_preserve_geometry, PathFlattenResult
+from core.path_flatten import flatten_paths_preserve_geometry, PathFlattenResult, generate_fpc_layout, FPCLayoutResult
 from core.exporter import Exporter, BatchExporter
 
 
@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.conformal_mapper: Optional[ConformalMapper] = None
         self.flatten_result: Optional[FlattenResult] = None
         self.path_flatten_result: Optional[PathFlattenResult] = None
+        self.fpc_layout_result: Optional[FPCLayoutResult] = None
         self.mesh_with_grooves: Optional[trimesh.Trimesh] = None
 
         self._setup_ui()
@@ -170,6 +171,7 @@ class MainWindow(QMainWindow):
         # 参数面板
         self.param_panel.generate_grooves_clicked.connect(self._on_generate_grooves)
         self.param_panel.flatten_clicked.connect(self._on_flatten)
+        self.param_panel.generate_fpc_layout_clicked.connect(self._on_generate_fpc_layout)
         self.param_panel.export_all_clicked.connect(self._on_export_all)
 
     def _on_open_model(self):
@@ -489,6 +491,48 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(self, "错误", f"展开失败: {e}")
 
+    def _on_generate_fpc_layout(self):
+        """生成FPC图纸布局"""
+        if self.path_flatten_result is None:
+            QMessageBox.warning(self, "警告", "请先展开路径")
+            return
+
+        self.status_bar.showMessage("正在生成FPC图纸...")
+
+        try:
+            # 获取FPC参数
+            fpc_params = self.param_panel.get_fpc_params()
+
+            # 生成FPC布局
+            self.fpc_layout_result = generate_fpc_layout(
+                flatten_result=self.path_flatten_result,
+                groove_width=fpc_params.groove_width,
+                pad_radius=fpc_params.pad_radius,
+                center_pad_radius=fpc_params.center_pad_radius
+            )
+
+            # 设置2D视图显示FPC布局
+            self.view_2d.set_fpc_layout(
+                groove_outlines=self.fpc_layout_result.groove_outlines,
+                ir_pads=self.fpc_layout_result.ir_pads,
+                center_pad=self.fpc_layout_result.center_pad,
+                merged_outline=self.fpc_layout_result.merged_outline,
+                bounds=self.fpc_layout_result.total_bounds
+            )
+
+            # 切换到2D视图
+            self.view_tabs.setCurrentIndex(1)
+
+            self.status_bar.showMessage(
+                f"FPC图纸生成完成 - 走线宽度: {fpc_params.groove_width}mm, "
+                f"{len(self.fpc_layout_result.groove_outlines)} 条凹槽轮廓"
+            )
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"生成FPC图纸失败: {e}")
+
     def _transform_path_to_2d(self, path_3d: np.ndarray) -> np.ndarray:
         """将3D路径转换到2D"""
         if self.flatten_result is None or len(path_3d) == 0:
@@ -557,6 +601,11 @@ class MainWindow(QMainWindow):
                 'depth': self.param_panel.groove_params.depth,
             }
 
+            # 获取FPC布局数据（如果有）
+            fpc_layout = None
+            if self.view_2d.has_fpc_layout():
+                fpc_layout = self.view_2d.get_fpc_layout_for_export()
+
             exported = exporter.export_all(
                 mesh=self.mesh,
                 mesh_with_grooves=self.mesh_with_grooves,
@@ -564,7 +613,8 @@ class MainWindow(QMainWindow):
                 ir_points_2d=ir_points_2d,
                 ir_points_data=ir_points_data,
                 groove_params=groove_params,
-                project_name="ir_array"
+                project_name="ir_array",
+                fpc_layout=fpc_layout
             )
 
             # 显示结果

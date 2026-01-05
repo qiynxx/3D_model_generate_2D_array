@@ -2,7 +2,7 @@
 import numpy as np
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 from PyQt5.QtCore import Qt, QPointF
-from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QFont
+from PyQt5.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QFont, QPolygonF
 from typing import Optional, List, Tuple, Dict
 
 
@@ -18,12 +18,20 @@ class View2D(QWidget):
         self.center_2d: Optional[np.ndarray] = None
         self.bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
+        # FPC布局数据
+        self.groove_outlines: Dict[str, np.ndarray] = {}  # 凹槽轮廓
+        self.ir_pads: Dict[str, np.ndarray] = {}  # IR点焊盘轮廓
+        self.center_pad: Optional[np.ndarray] = None  # 中心焊盘轮廓
+        self.merged_outline: Optional[np.ndarray] = None  # 合并后的总轮廓
+
         # 视图参数
         self.view_scale = 1.0
         self.view_offset = np.array([0.0, 0.0])
         self.show_paths = True
         self.show_points = True
         self.show_grid = True
+        self.show_groove_outlines = True  # 是否显示凹槽轮廓
+        self.show_fpc_layout = False  # 是否显示FPC布局模式
 
         self.setMinimumSize(400, 400)
         self.setStyleSheet("background-color: #1a1a2e;")
@@ -47,6 +55,32 @@ class View2D(QWidget):
         self.ir_points_2d = {}
         self.center_2d = None
         self.bounds = None
+        # 清除FPC布局数据
+        self.groove_outlines = {}
+        self.ir_pads = {}
+        self.center_pad = None
+        self.merged_outline = None
+        self.show_fpc_layout = False
+        self.update()
+
+    def set_fpc_layout(self, groove_outlines: Dict[str, np.ndarray],
+                       ir_pads: Dict[str, np.ndarray],
+                       center_pad: np.ndarray,
+                       merged_outline: Optional[np.ndarray],
+                       bounds: Tuple[np.ndarray, np.ndarray]):
+        """设置FPC布局数据"""
+        self.groove_outlines = {k: v.copy() for k, v in groove_outlines.items()}
+        self.ir_pads = {k: v.copy() for k, v in ir_pads.items()}
+        self.center_pad = center_pad.copy() if center_pad is not None else None
+        self.merged_outline = merged_outline.copy() if merged_outline is not None else None
+        self.bounds = (bounds[0].copy(), bounds[1].copy())
+        self.show_fpc_layout = True
+        self._auto_fit()
+        self.update()
+
+    def toggle_fpc_layout(self, show: bool):
+        """切换FPC布局显示"""
+        self.show_fpc_layout = show
         self.update()
 
     def _auto_fit(self):
@@ -85,7 +119,7 @@ class View2D(QWidget):
         # 绘制背景
         painter.fillRect(self.rect(), QColor('#1a1a2e'))
 
-        if not self.paths_2d:
+        if not self.paths_2d and not self.groove_outlines:
             # 显示提示
             painter.setPen(QColor(255, 255, 255))
             painter.setFont(QFont('Arial', 12))
@@ -99,9 +133,13 @@ class View2D(QWidget):
         if self.show_grid:
             self._draw_grid(painter)
 
-        # 绘制路径
-        if self.show_paths:
-            self._draw_paths(painter)
+        # 如果是FPC布局模式，绘制凹槽轮廓
+        if self.show_fpc_layout and self.groove_outlines:
+            self._draw_fpc_layout(painter)
+        else:
+            # 绘制路径
+            if self.show_paths:
+                self._draw_paths(painter)
 
         # 绘制IR点
         if self.show_points:
@@ -169,6 +207,81 @@ class View2D(QWidget):
                 qpath.lineTo(self._to_screen(path[i]))
             painter.drawPath(qpath)
 
+    def _draw_fpc_layout(self, painter: QPainter):
+        """绘制FPC布局（带宽度的凹槽轮廓）"""
+        groove_colors = [
+            '#f39c12',  # 橙色
+            '#3498db',  # 蓝色
+            '#9b59b6',  # 紫色
+            '#1abc9c',  # 青色
+            '#e91e63',  # 粉色
+            '#00bcd4',  # 天蓝
+            '#ff5722',  # 深橙
+            '#8bc34a',  # 浅绿
+        ]
+
+        # 绘制凹槽轮廓（填充）
+        for idx, (point_id, outline) in enumerate(self.groove_outlines.items()):
+            if len(outline) < 3:
+                continue
+
+            color = QColor(groove_colors[idx % len(groove_colors)])
+            color.setAlpha(100)  # 半透明填充
+
+            # 绘制填充的多边形
+            polygon = QPolygonF()
+            for pt in outline:
+                polygon.append(self._to_screen(pt))
+
+            painter.setPen(QPen(QColor(groove_colors[idx % len(groove_colors)]), 1.5))
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(polygon)
+
+        # 绘制IR点焊盘
+        for point_id, pad in self.ir_pads.items():
+            if len(pad) < 3:
+                continue
+
+            color = QColor('#2ecc71')
+            color.setAlpha(150)
+
+            polygon = QPolygonF()
+            for pt in pad:
+                polygon.append(self._to_screen(pt))
+
+            painter.setPen(QPen(QColor('#2ecc71'), 1.5))
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(polygon)
+
+        # 绘制中心焊盘
+        if self.center_pad is not None and len(self.center_pad) >= 3:
+            color = QColor('#e74c3c')
+            color.setAlpha(150)
+
+            polygon = QPolygonF()
+            for pt in self.center_pad:
+                polygon.append(self._to_screen(pt))
+
+            painter.setPen(QPen(QColor('#e74c3c'), 1.5))
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(polygon)
+
+        # 绘制合并后的总轮廓（虚线）
+        if self.merged_outline is not None and len(self.merged_outline) >= 3:
+            pen = QPen(QColor('#ffffff'))
+            pen.setWidthF(2.0)
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+
+            polygon = QPolygonF()
+            for pt in self.merged_outline:
+                polygon.append(self._to_screen(pt))
+            # 闭合轮廓
+            polygon.append(self._to_screen(self.merged_outline[0]))
+
+            painter.drawPolygon(polygon)
+
     def _draw_ir_points(self, painter: QPainter):
         """绘制IR点"""
         for point_id, (pos, name, is_center) in self.ir_points_2d.items():
@@ -230,12 +343,33 @@ class View2D(QWidget):
         painter.setPen(QColor(255, 255, 255))
         painter.drawText(x + 15, y + 9, "IR点")
 
-        # 路径
-        y += 20
-        painter.setPen(QPen(QColor('#f39c12'), 2))
-        painter.drawLine(x, y + 5, x + 10, y + 5)
-        painter.setPen(QColor(255, 255, 255))
-        painter.drawText(x + 15, y + 9, "走线路径")
+        if self.show_fpc_layout and self.groove_outlines:
+            # 凹槽轮廓
+            y += 20
+            color = QColor('#f39c12')
+            color.setAlpha(100)
+            painter.setBrush(QBrush(color))
+            painter.setPen(QPen(QColor('#f39c12'), 1))
+            painter.drawRect(x, y, 10, 10)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(x + 15, y + 9, "凹槽轮廓")
+
+            # 外边框
+            y += 20
+            pen = QPen(QColor('#ffffff'))
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(x, y, 10, 10)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(x + 15, y + 9, "FPC外形")
+        else:
+            # 路径
+            y += 20
+            painter.setPen(QPen(QColor('#f39c12'), 2))
+            painter.drawLine(x, y + 5, x + 10, y + 5)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(x + 15, y + 9, "走线路径")
 
     def resizeEvent(self, event):
         """窗口大小改变"""
@@ -269,3 +403,16 @@ class View2D(QWidget):
     def get_points_for_export(self) -> List[Tuple[np.ndarray, str]]:
         """获取用于导出的点（实际尺寸mm）"""
         return [(pos, name) for pos, name, _ in self.ir_points_2d.values()]
+
+    def get_fpc_layout_for_export(self) -> Dict:
+        """获取FPC布局数据用于导出"""
+        return {
+            'groove_outlines': list(self.groove_outlines.values()),
+            'ir_pads': list(self.ir_pads.values()),
+            'center_pad': self.center_pad,
+            'merged_outline': self.merged_outline
+        }
+
+    def has_fpc_layout(self) -> bool:
+        """检查是否有FPC布局数据"""
+        return len(self.groove_outlines) > 0

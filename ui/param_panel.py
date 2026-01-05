@@ -25,6 +25,14 @@ class ExportParams:
     output_dir: str = ""
 
 
+@dataclass
+class FPCParams:
+    """FPC布局参数"""
+    groove_width: float = 1.0  # 凹槽宽度（用于2D展开）
+    pad_radius: float = 2.0  # IR点焊盘半径
+    center_pad_radius: float = 3.0  # 中心焊盘半径
+
+
 class ParamPanel(QWidget):
     """参数设置面板"""
 
@@ -32,6 +40,7 @@ class ParamPanel(QWidget):
     groove_params_changed = pyqtSignal(object)  # GrooveParams
     generate_grooves_clicked = pyqtSignal()
     flatten_clicked = pyqtSignal()
+    generate_fpc_layout_clicked = pyqtSignal()  # 新增：生成FPC布局图
     export_all_clicked = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -39,6 +48,7 @@ class ParamPanel(QWidget):
 
         self.groove_params = GrooveParams()
         self.export_params = ExportParams()
+        self.fpc_params = FPCParams()
 
         self._setup_ui()
 
@@ -210,6 +220,61 @@ class ParamPanel(QWidget):
         self.btn_flatten.clicked.connect(lambda: self.flatten_clicked.emit())
         layout.addWidget(self.btn_flatten)
 
+        # FPC布局设置
+        fpc_group = QGroupBox("FPC图纸设置")
+        fpc_layout = QVBoxLayout(fpc_group)
+
+        # 凹槽宽度（用于2D展开）
+        fpc_width_layout = QHBoxLayout()
+        fpc_width_layout.addWidget(QLabel("走线宽度 (mm):"))
+        self.fpc_width_spin = QDoubleSpinBox()
+        self.fpc_width_spin.setRange(0.1, 10.0)
+        self.fpc_width_spin.setValue(1.0)
+        self.fpc_width_spin.setSingleStep(0.1)
+        self.fpc_width_spin.valueChanged.connect(self._on_fpc_params_changed)
+        fpc_width_layout.addWidget(self.fpc_width_spin)
+        fpc_layout.addLayout(fpc_width_layout)
+
+        # IR焊盘半径
+        pad_layout = QHBoxLayout()
+        pad_layout.addWidget(QLabel("IR焊盘半径 (mm):"))
+        self.pad_radius_spin = QDoubleSpinBox()
+        self.pad_radius_spin.setRange(0.5, 10.0)
+        self.pad_radius_spin.setValue(2.0)
+        self.pad_radius_spin.setSingleStep(0.5)
+        self.pad_radius_spin.valueChanged.connect(self._on_fpc_params_changed)
+        pad_layout.addWidget(self.pad_radius_spin)
+        fpc_layout.addLayout(pad_layout)
+
+        # 中心焊盘半径
+        center_pad_layout = QHBoxLayout()
+        center_pad_layout.addWidget(QLabel("中心焊盘半径 (mm):"))
+        self.center_pad_spin = QDoubleSpinBox()
+        self.center_pad_spin.setRange(0.5, 15.0)
+        self.center_pad_spin.setValue(3.0)
+        self.center_pad_spin.setSingleStep(0.5)
+        self.center_pad_spin.valueChanged.connect(self._on_fpc_params_changed)
+        center_pad_layout.addWidget(self.center_pad_spin)
+        fpc_layout.addLayout(center_pad_layout)
+
+        layout.addWidget(fpc_group)
+
+        # 生成FPC图纸按钮
+        self.btn_generate_fpc = QPushButton("生成FPC图纸")
+        self.btn_generate_fpc.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #f39c12;
+            }
+        """)
+        self.btn_generate_fpc.clicked.connect(lambda: self.generate_fpc_layout_clicked.emit())
+        layout.addWidget(self.btn_generate_fpc)
+
         # 变形信息
         self.distortion_label = QLabel("变形量: -")
         layout.addWidget(self.distortion_label)
@@ -256,6 +321,14 @@ class ParamPanel(QWidget):
         self.export_svg.setChecked(False)
         files_layout.addWidget(self.export_svg)
 
+        self.export_fpc_dxf = QCheckBox("FPC图纸 (DXF)")
+        self.export_fpc_dxf.setChecked(True)
+        files_layout.addWidget(self.export_fpc_dxf)
+
+        self.export_fpc_svg = QCheckBox("FPC图纸 (SVG)")
+        self.export_fpc_svg.setChecked(True)
+        files_layout.addWidget(self.export_fpc_svg)
+
         self.export_project = QCheckBox("项目配置 (JSON)")
         self.export_project.setChecked(True)
         files_layout.addWidget(self.export_project)
@@ -299,6 +372,12 @@ class ParamPanel(QWidget):
 
         self.groove_params_changed.emit(self.groove_params)
 
+    def _on_fpc_params_changed(self):
+        """FPC参数变更"""
+        self.fpc_params.groove_width = self.fpc_width_spin.value()
+        self.fpc_params.pad_radius = self.pad_radius_spin.value()
+        self.fpc_params.center_pad_radius = self.center_pad_spin.value()
+
     def _on_browse_clicked(self):
         """浏览按钮点击"""
         dir_path = QFileDialog.getExistingDirectory(
@@ -327,6 +406,11 @@ class ParamPanel(QWidget):
         """获取导出参数"""
         self.export_params.scale = self.scale_spin.value()
         return self.export_params
+
+    def get_fpc_params(self) -> FPCParams:
+        """获取FPC布局参数"""
+        self._on_fpc_params_changed()
+        return self.fpc_params
 
     def set_progress(self, value: int, text: str = ""):
         """设置进度"""

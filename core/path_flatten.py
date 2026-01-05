@@ -857,3 +857,223 @@ def flatten_paths_with_arc_length(
 # 保留旧函数名作为别名
 def flatten_paths_with_curvature(*args, **kwargs):
     return flatten_paths_preserve_geometry(*args, **kwargs)
+
+
+@dataclass
+class FPCLayoutResult:
+    """FPC布局结果"""
+    groove_outlines: Dict[str, np.ndarray]  # point_id -> 凹槽轮廓（闭合多边形）
+    merged_outline: Optional[np.ndarray]  # 合并后的总轮廓
+    center_pad: np.ndarray  # 中心焊盘轮廓
+    ir_pads: Dict[str, np.ndarray]  # point_id -> IR点焊盘轮廓
+    total_bounds: Tuple[np.ndarray, np.ndarray]  # 边界
+
+
+def generate_path_offset(path_2d: np.ndarray, width: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    根据路径生成左右偏移线
+
+    Args:
+        path_2d: 2D路径点 (N, 2)
+        width: 凹槽宽度
+
+    Returns:
+        (left_offset, right_offset) 左侧和右侧偏移线
+    """
+    n = len(path_2d)
+    if n < 2:
+        return np.array([]), np.array([])
+
+    half_width = width / 2.0
+
+    # 计算每个点的法向量（垂直于路径方向）
+    normals = np.zeros((n, 2))
+
+    for i in range(n):
+        if i == 0:
+            tangent = path_2d[1] - path_2d[0]
+        elif i == n - 1:
+            tangent = path_2d[-1] - path_2d[-2]
+        else:
+            tangent = path_2d[i + 1] - path_2d[i - 1]
+
+        # 归一化切向量
+        length = np.linalg.norm(tangent)
+        if length < 1e-10:
+            normals[i] = np.array([0.0, 1.0])
+        else:
+            tangent = tangent / length
+            # 法向量 = 切向量旋转90度
+            normals[i] = np.array([-tangent[1], tangent[0]])
+
+    # 生成左右偏移线
+    left_offset = path_2d + half_width * normals
+    right_offset = path_2d - half_width * normals
+
+    return left_offset, right_offset
+
+
+def create_groove_outline(path_2d: np.ndarray, width: float) -> np.ndarray:
+    """
+    根据路径和宽度创建凹槽轮廓（闭合多边形）
+
+    Args:
+        path_2d: 2D路径点
+        width: 凹槽宽度
+
+    Returns:
+        闭合轮廓点（逆时针方向）
+    """
+    left, right = generate_path_offset(path_2d, width)
+
+    if len(left) == 0:
+        return np.array([])
+
+    # 创建闭合轮廓：左侧正向 + 右侧反向
+    outline = np.vstack([left, right[::-1]])
+
+    return outline
+
+
+def create_circular_pad(center: np.ndarray, radius: float, n_points: int = 32) -> np.ndarray:
+    """
+    创建圆形焊盘轮廓
+
+    Args:
+        center: 中心点坐标
+        radius: 半径
+        n_points: 采样点数
+
+    Returns:
+        圆形轮廓点
+    """
+    angles = np.linspace(0, 2 * np.pi, n_points, endpoint=False)
+    circle = np.column_stack([
+        center[0] + radius * np.cos(angles),
+        center[1] + radius * np.sin(angles)
+    ])
+    return circle
+
+
+def create_rectangular_pad(center: np.ndarray, width: float, height: float) -> np.ndarray:
+    """
+    创建矩形焊盘轮廓
+
+    Args:
+        center: 中心点坐标
+        width: 宽度
+        height: 高度
+
+    Returns:
+        矩形轮廓点（逆时针）
+    """
+    hw = width / 2
+    hh = height / 2
+    return np.array([
+        [center[0] - hw, center[1] - hh],
+        [center[0] + hw, center[1] - hh],
+        [center[0] + hw, center[1] + hh],
+        [center[0] - hw, center[1] + hh]
+    ])
+
+
+def merge_overlapping_outlines(outlines: List[np.ndarray]) -> Optional[np.ndarray]:
+    """
+    合并重叠的轮廓
+
+    使用简单的凸包方法或点集并集
+    对于复杂情况可能需要使用shapely库
+    """
+    if not outlines:
+        return None
+
+    # 收集所有点
+    all_points = []
+    for outline in outlines:
+        if len(outline) > 0:
+            all_points.extend(outline.tolist())
+
+    if not all_points:
+        return None
+
+    all_points = np.array(all_points)
+
+    # 简单方法：使用凸包
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(all_points)
+        return all_points[hull.vertices]
+    except:
+        # 如果凸包失败，返回边界框
+        min_pt = all_points.min(axis=0)
+        max_pt = all_points.max(axis=0)
+        return np.array([
+            [min_pt[0], min_pt[1]],
+            [max_pt[0], min_pt[1]],
+            [max_pt[0], max_pt[1]],
+            [min_pt[0], max_pt[1]]
+        ])
+
+
+def generate_fpc_layout(
+    flatten_result: PathFlattenResult,
+    groove_width: float = 1.0,
+    pad_radius: float = 2.0,
+    center_pad_radius: float = 3.0
+) -> FPCLayoutResult:
+    """
+    根据展开结果生成FPC布局图
+
+    Args:
+        flatten_result: 路径展开结果
+        groove_width: 凹槽（走线）宽度
+        pad_radius: IR点焊盘半径
+        center_pad_radius: 中心焊盘半径
+
+    Returns:
+        FPC布局结果
+    """
+    groove_outlines = {}
+    ir_pads = {}
+    all_outline_points = []
+
+    # 为每条路径生成凹槽轮廓
+    for point_id, path_2d in flatten_result.paths_2d.items():
+        if len(path_2d) >= 2:
+            outline = create_groove_outline(path_2d, groove_width)
+            if len(outline) > 0:
+                groove_outlines[point_id] = outline
+                all_outline_points.extend(outline.tolist())
+
+    # 生成IR点焊盘
+    for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
+        if is_center:
+            continue  # 中心点单独处理
+        pad = create_circular_pad(pos, pad_radius)
+        ir_pads[point_id] = pad
+        all_outline_points.extend(pad.tolist())
+
+    # 生成中心焊盘
+    center_pad = create_circular_pad(flatten_result.center_2d, center_pad_radius)
+    all_outline_points.extend(center_pad.tolist())
+
+    # 合并所有轮廓
+    all_outlines = list(groove_outlines.values()) + list(ir_pads.values()) + [center_pad]
+    merged_outline = merge_overlapping_outlines(all_outlines)
+
+    # 计算边界
+    if all_outline_points:
+        all_points = np.array(all_outline_points)
+        min_bounds = all_points.min(axis=0) - 5
+        max_bounds = all_points.max(axis=0) + 5
+    else:
+        min_bounds = np.array([-10, -10])
+        max_bounds = np.array([10, 10])
+
+    return FPCLayoutResult(
+        groove_outlines=groove_outlines,
+        merged_outline=merged_outline,
+        center_pad=center_pad,
+        ir_pads=ir_pads,
+        total_bounds=(min_bounds, max_bounds)
+    )
