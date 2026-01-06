@@ -21,7 +21,12 @@ from core.mesh_loader import MeshLoader
 from core.geodesic import PathManager, IRPoint
 from core.groove_gen import GrooveGenerator
 from core.conformal_map import ConformalMapper, FlattenResult
-from core.path_flatten import flatten_paths_preserve_geometry, PathFlattenResult, generate_fpc_layout, FPCLayoutResult
+from core.path_flatten import (
+    flatten_paths_preserve_geometry, PathFlattenResult,
+    generate_fpc_layout, FPCLayoutResult,
+    validate_flatten_accuracy, FlattenValidationResult,
+    FPCFittingAnimator
+)
 from core.exporter import Exporter, BatchExporter, ProjectSnapshot, FolderExporter
 
 
@@ -40,6 +45,12 @@ class MainWindow(QMainWindow):
         self.path_flatten_result: Optional[PathFlattenResult] = None
         self.fpc_layout_result: Optional[FPCLayoutResult] = None
         self.mesh_with_grooves: Optional[trimesh.Trimesh] = None
+
+        # 动画相关
+        self.fpc_animator: Optional[FPCFittingAnimator] = None
+        self.animation_timer = None
+        self.animation_progress = 0.0
+        self.animation_actor = None
 
         self._setup_ui()
         self._setup_menu()
@@ -206,6 +217,8 @@ class MainWindow(QMainWindow):
         self.param_panel.generate_grooves_clicked.connect(self._on_generate_grooves)
         self.param_panel.flatten_clicked.connect(self._on_flatten)
         self.param_panel.generate_fpc_layout_clicked.connect(self._on_generate_fpc_layout)
+        self.param_panel.validate_flatten_clicked.connect(self._on_validate_flatten)
+        self.param_panel.play_fitting_animation_clicked.connect(self._on_play_fitting_animation)
         self.param_panel.export_all_clicked.connect(self._on_export_to_folder)
         self.param_panel.export_single_clicked.connect(self._on_export_single)
 
@@ -1480,3 +1493,158 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self, "保存失败", str(e))
+
+    # ========== 精度验证相关方法 ==========
+
+    def _on_validate_flatten(self):
+        """验证展平精度"""
+        if self.path_flatten_result is None:
+            QMessageBox.warning(self, "警告", "请先展开路径")
+            return
+
+        if self.mesh is None or self.path_manager is None:
+            QMessageBox.warning(self, "警告", "请先加载模型和生成路径")
+            return
+
+        self.status_bar.showMessage("正在验证展平精度...")
+
+        try:
+            # 准备3D路径数据
+            paths_3d = {}
+            for point_id, smooth_path in self.path_manager.smooth_paths.items():
+                if len(smooth_path) > 0:
+                    paths_3d[point_id] = smooth_path
+
+            # 准备3D IR点数据
+            ir_points_3d = {}
+            for point_id, point in self.path_manager.ir_points.items():
+                ir_points_3d[point_id] = (point.position, point.name, point.is_center)
+
+            # 验证
+            validation_result = validate_flatten_accuracy(
+                mesh=self.mesh,
+                uv_coords=self.path_flatten_result.uv_coords,
+                paths_3d=paths_3d,
+                paths_2d=self.path_flatten_result.paths_2d,
+                ir_points=ir_points_3d,
+                ir_points_2d=self.path_flatten_result.ir_points_2d
+            )
+
+            # 显示结果
+            if validation_result.is_valid:
+                QMessageBox.information(
+                    self, "验证通过",
+                    f"{validation_result.validation_message}\n\n"
+                    f"平均长度误差: {validation_result.avg_length_error:.2f}%\n"
+                    f"最大长度误差: {validation_result.max_length_error:.2f}%\n"
+                    f"平均位置误差: {validation_result.avg_distance_error:.4f}mm\n"
+                    f"最大位置误差: {validation_result.max_distance_error:.4f}mm"
+                )
+            else:
+                QMessageBox.warning(
+                    self, "验证失败",
+                    f"{validation_result.validation_message}\n\n"
+                    f"平均长度误差: {validation_result.avg_length_error:.2f}%\n"
+                    f"最大长度误差: {validation_result.max_length_error:.2f}%\n"
+                    f"平均位置误差: {validation_result.avg_distance_error:.4f}mm\n"
+                    f"最大位置误差: {validation_result.max_distance_error:.4f}mm\n\n"
+                    "建议检查模型和路径，可能需要调整展平参数"
+                )
+
+            self.status_bar.showMessage(validation_result.validation_message)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"验证失败: {e}")
+
+    # ========== FPC贴合动画相关方法 ==========
+
+    def _on_play_fitting_animation(self):
+        """播放FPC贴合动画"""
+        if self.fpc_layout_result is None:
+            QMessageBox.warning(self, "警告", "请先生成FPC图纸")
+            return
+
+        if self.path_flatten_result is None:
+            QMessageBox.warning(self, "警告", "请先展开路径")
+            return
+
+        if self.mesh is None:
+            QMessageBox.warning(self, "警告", "请先加载模型")
+            return
+
+        self.status_bar.showMessage("正在准备FPC贴合动画...")
+
+        try:
+            # 创建动画控制器
+            self.fpc_animator = FPCFittingAnimator(
+                mesh=self.mesh,
+                uv_coords=self.path_flatten_result.uv_coords,
+                fpc_layout=self.fpc_layout_result
+            )
+
+            if not self.fpc_animator.is_ready():
+                QMessageBox.warning(self, "警告", "无法创建动画，请检查FPC布局数据")
+                return
+
+            # 切换到3D视图
+            self.view_tabs.setCurrentIndex(0)
+
+            # 初始化动画参数
+            self.animation_progress = 0.0
+
+            # 使用QTimer创建动画
+            from PyQt5.QtCore import QTimer
+            if self.animation_timer is not None:
+                self.animation_timer.stop()
+
+            self.animation_timer = QTimer()
+            self.animation_timer.timeout.connect(self._on_animation_frame)
+            self.animation_timer.start(33)  # 约30fps
+
+            self.status_bar.showMessage("播放FPC贴合动画... (0%)")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"动画播放失败: {e}")
+
+    def _on_animation_frame(self):
+        """动画帧更新"""
+        if self.fpc_animator is None or not self.fpc_animator.is_ready():
+            self._stop_animation()
+            return
+
+        # 更新进度
+        self.animation_progress += 0.015  # 约2秒完成一次动画
+
+        if self.animation_progress >= 1.0:
+            # 动画完成后保持最终状态一段时间，然后停止
+            self.animation_progress = 1.0
+            self._update_animation_display()
+            self._stop_animation()
+            self.status_bar.showMessage("FPC贴合动画完成")
+            return
+
+        self._update_animation_display()
+        progress_percent = int(self.animation_progress * 100)
+        self.status_bar.showMessage(f"播放FPC贴合动画... ({progress_percent}%)")
+
+    def _update_animation_display(self):
+        """更新动画显示"""
+        if self.fpc_animator is None:
+            return
+
+        frame_mesh = self.fpc_animator.get_frame(self.animation_progress)
+        if frame_mesh is None:
+            return
+
+        # 更新3D视图中的FPC网格
+        self.viewer_3d.update_fpc_animation_mesh(frame_mesh)
+
+    def _stop_animation(self):
+        """停止动画"""
+        if self.animation_timer is not None:
+            self.animation_timer.stop()
+            self.animation_timer = None

@@ -47,6 +47,8 @@ class ParamPanel(QWidget):
     generate_grooves_clicked = pyqtSignal()
     flatten_clicked = pyqtSignal()
     generate_fpc_layout_clicked = pyqtSignal()  # 新增：生成FPC布局图
+    validate_flatten_clicked = pyqtSignal()  # 新增：验证展平精度
+    play_fitting_animation_clicked = pyqtSignal()  # 新增：播放FPC贴合动画
     export_all_clicked = pyqtSignal()
     # 单独导出信号
     export_single_clicked = pyqtSignal(str)  # 导出类型
@@ -375,6 +377,56 @@ class ParamPanel(QWidget):
         """)
         self.btn_generate_fpc.clicked.connect(lambda: self.generate_fpc_layout_clicked.emit())
         layout.addWidget(self.btn_generate_fpc)
+
+        # 精度验证和动画仿真
+        validation_group = QGroupBox("精度验证与动画仿真")
+        validation_layout = QVBoxLayout(validation_group)
+
+        # 验证按钮
+        self.btn_validate = QPushButton("验证展平精度")
+        self.btn_validate.setStyleSheet("""
+            QPushButton {
+                background-color: #16a085;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1abc9c;
+            }
+        """)
+        self.btn_validate.setToolTip(
+            "验证3D路径展开为2D后的精度，\n"
+            "检查长度保持和往返映射误差"
+        )
+        self.btn_validate.clicked.connect(lambda: self.validate_flatten_clicked.emit())
+        validation_layout.addWidget(self.btn_validate)
+
+        # 动画仿真按钮
+        self.btn_animation = QPushButton("播放FPC贴合动画")
+        self.btn_animation.setStyleSheet("""
+            QPushButton {
+                background-color: #c0392b;
+                color: white;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e74c3c;
+            }
+        """)
+        self.btn_animation.setToolTip(
+            "播放2D FPC逐渐贴合到3D模型表面的动画，\n"
+            "用于在3D打印前验证贴合效果"
+        )
+        self.btn_animation.clicked.connect(lambda: self.play_fitting_animation_clicked.emit())
+        validation_layout.addWidget(self.btn_animation)
+
+        validation_info = QLabel("验证展平精度，减少3D打印验证工作量")
+        validation_info.setStyleSheet("color: gray; font-size: 10px;")
+        validation_layout.addWidget(validation_info)
+
+        layout.addWidget(validation_group)
 
         # 变形信息
         self.distortion_label = QLabel("变形量: -")

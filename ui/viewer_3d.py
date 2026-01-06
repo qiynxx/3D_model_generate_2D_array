@@ -951,3 +951,51 @@ class Viewer3D(QWidget):
             except:
                 pass
             self._origin_highlight_actor = None
+
+    # ========== FPC贴合动画相关方法 ==========
+
+    def update_fpc_animation_mesh(self, frame_mesh: trimesh.Trimesh):
+        """更新FPC动画帧网格
+
+        Args:
+            frame_mesh: 当前帧的FPC网格
+        """
+        try:
+            # 转换为PyVista网格
+            faces = np.hstack([
+                np.full((len(frame_mesh.faces), 1), 3),
+                frame_mesh.faces
+            ]).flatten()
+            pv_mesh = pv.PolyData(frame_mesh.vertices, faces)
+            pv_mesh.compute_normals(inplace=True)
+
+            # 添加或更新动画网格
+            self.plotter.add_mesh(
+                pv_mesh,
+                name='fpc_animation',
+                color='#e74c3c',  # 红色，便于区分
+                show_edges=False,
+                opacity=0.9,
+                smooth_shading=True,
+                specular=0.5,
+                specular_power=15,
+                ambient=0.3,
+                diffuse=0.7,
+                pickable=False
+            )
+
+            # 立即渲染
+            self.plotter.render()
+
+        except Exception as e:
+            print(f"动画帧更新失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def clear_fpc_animation(self):
+        """清除FPC动画网格"""
+        try:
+            self.plotter.remove_actor('fpc_animation')
+        except:
+            pass
+        self.plotter.render()
