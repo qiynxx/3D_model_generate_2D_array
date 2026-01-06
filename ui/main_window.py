@@ -515,29 +515,60 @@ class MainWindow(QMainWindow):
 
             # 尝试将凹槽应用到模型（布尔运算）
             try:
+                # 使用布尔并集合并所有凹槽（确保交叉区域正确处理）
+                # 而不是简单的 concatenate，因为 concatenate 不会合并交叉部分
                 combined_groove = all_grooves[0]
-                for groove in all_grooves[1:]:
-                    combined_groove = trimesh.util.concatenate([combined_groove, groove])
+                union_engine = None  # 记录成功的引擎
 
-                # 尝试不同的布尔运算引擎
+                if len(all_grooves) > 1:
+                    print(f"正在合并 {len(all_grooves)} 个凹槽...")
+                    # 首先尝试确定可用的布尔引擎
+                    for engine in ['manifold', 'blender']:
+                        try:
+                            # 测试引擎是否可用
+                            test_union = all_grooves[0].union(all_grooves[1], engine=engine)
+                            if test_union is not None and len(test_union.vertices) > 0:
+                                union_engine = engine
+                                combined_groove = test_union
+                                print(f"使用 {engine} 引擎合并凹槽")
+                                break
+                        except Exception as e:
+                            print(f"{engine} 引擎不可用: {e}")
+                            continue
+
+                    if union_engine is not None:
+                        # 使用确定的引擎合并剩余凹槽
+                        for i, groove in enumerate(all_grooves[2:], start=2):
+                            try:
+                                combined_groove = combined_groove.union(groove, engine=union_engine)
+                                if (i + 1) % 10 == 0:
+                                    print(f"  已合并 {i + 1}/{len(all_grooves)} 个凹槽...")
+                            except Exception as e:
+                                print(f"  警告: 第 {i + 1} 个凹槽合并失败，使用 concatenate: {e}")
+                                combined_groove = trimesh.util.concatenate([combined_groove, groove])
+                    else:
+                        # 所有布尔引擎都不可用，回退到 concatenate
+                        print("警告: 布尔并集引擎不可用，使用简单连接（交叉部分可能有问题）")
+                        for groove in all_grooves[1:]:
+                            combined_groove = trimesh.util.concatenate([combined_groove, groove])
+
+                print(f"凹槽合并完成，总顶点数: {len(combined_groove.vertices)}")
+
+                # 尝试不同的布尔运算引擎执行差集
                 boolean_success = False
 
-                # 尝试 Blender 引擎
-                try:
-                    self.mesh_with_grooves = self.mesh.difference(combined_groove, engine='blender')
-                    print("凹槽已应用到模型 (Blender引擎)")
-                    boolean_success = True
-                except Exception as e1:
-                    print(f"Blender引擎不可用: {e1}")
+                # 优先使用与合并相同的引擎
+                engines_to_try = ['manifold', 'blender'] if union_engine is None else [union_engine] + [e for e in ['manifold', 'blender'] if e != union_engine]
 
-                # 尝试 Manifold 引擎
-                if not boolean_success:
+                for engine in engines_to_try:
+                    if boolean_success:
+                        break
                     try:
-                        self.mesh_with_grooves = self.mesh.difference(combined_groove, engine='manifold')
-                        print("凹槽已应用到模型 (Manifold引擎)")
+                        self.mesh_with_grooves = self.mesh.difference(combined_groove, engine=engine)
+                        print(f"凹槽已应用到模型 ({engine}引擎)")
                         boolean_success = True
-                    except Exception as e2:
-                        print(f"Manifold引擎不可用: {e2}")
+                    except Exception as e:
+                        print(f"{engine}引擎差集失败: {e}")
 
                 if not boolean_success:
                     print("\n提示: 布尔运算需要安装 blender 或 manifold3d")
