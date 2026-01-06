@@ -64,20 +64,37 @@ class Exporter:
             doc = ezdxf.new(dxfversion='R2010')
             msp = doc.modelspace()
 
+            # 设置单位为毫米 (INSUNITS = 4 表示毫米)
+            doc.header['$INSUNITS'] = 4
+            # 设置测量单位为公制
+            doc.header['$MEASUREMENT'] = 1
+
             # 创建图层
             doc.layers.add('PATHS', color=1)  # 红色
             doc.layers.add('IR_POINTS', color=3)  # 绿色
             doc.layers.add('LABELS', color=7)  # 白色
 
             # 绘制路径
+            all_x = []
+            all_y = []
             for path in paths_2d:
                 if len(path) < 2:
                     continue
                 points = [(p[0] * scale, p[1] * scale) for p in path]
+                all_x.extend([p[0] for p in points])
+                all_y.extend([p[1] for p in points])
                 msp.add_lwpolyline(
                     points,
                     dxfattribs={'layer': 'PATHS', 'lineweight': int(line_width * 100)}
                 )
+
+            # 输出尺寸调试信息
+            if all_x and all_y:
+                x_range = max(all_x) - min(all_x)
+                y_range = max(all_y) - min(all_y)
+                print(f"DXF导出尺寸 (mm): X范围={x_range:.2f}, Y范围={y_range:.2f}")
+                print(f"  X: [{min(all_x):.2f}, {max(all_x):.2f}]")
+                print(f"  Y: [{min(all_y):.2f}, {max(all_y):.2f}]")
 
             # 绘制IR点
             point_radius = 0.5 * scale
@@ -135,6 +152,11 @@ class Exporter:
         try:
             doc = ezdxf.new(dxfversion='R2010')
             msp = doc.modelspace()
+
+            # 设置单位为毫米 (INSUNITS = 4 表示毫米)
+            doc.header['$INSUNITS'] = 4
+            # 设置测量单位为公制
+            doc.header['$MEASUREMENT'] = 1
 
             # 创建图层
             doc.layers.add('GROOVES', color=1)  # 红色 - 凹槽轮廓

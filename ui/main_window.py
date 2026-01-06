@@ -238,10 +238,15 @@ class MainWindow(QMainWindow):
         # 清除旧的点位
         self.point_panel.clear_all()
 
-        # 更新状态
+        # 更新状态 - 显示模型尺寸
         info = MeshLoader.get_mesh_info(self.mesh)
+        bounds = info['bounds']
+        size_x = bounds[1][0] - bounds[0][0]
+        size_y = bounds[1][1] - bounds[0][1]
+        size_z = bounds[1][2] - bounds[0][2]
         self.status_bar.showMessage(
             f"已加载: {Path(filepath).name} | "
+            f"尺寸: {size_x:.1f}×{size_y:.1f}×{size_z:.1f} mm | "
             f"顶点: {info['vertices']} | 面: {info['faces']}"
         )
 
