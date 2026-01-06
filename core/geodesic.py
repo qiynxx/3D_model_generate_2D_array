@@ -181,6 +181,9 @@ class IRPoint:
     connections: List[str] = field(default_factory=list)
     group: str = "default"
     name: str = ""
+    # 焊盘尺寸（可单独调整）
+    pad_length: float = 3.0  # 方形焊盘长度
+    pad_width: float = 2.0   # 方形焊盘宽度
 
     def __post_init__(self):
         if not self.name:
@@ -339,6 +342,7 @@ class PathManager:
         self.paths: Dict[str, Tuple[List[int], np.ndarray]] = {}
         self.smooth_paths: Dict[str, np.ndarray] = {}  # 平滑后的路径
         self.smoothness: float = 0.5  # 平滑度参数
+        self._point_counter: int = 0  # 点序号计数器
 
     def set_smoothness(self, smoothness: float):
         """设置平滑度 (0-1)"""
@@ -352,6 +356,11 @@ class PathManager:
         name: str = ""
     ) -> IRPoint:
         """添加IR点"""
+        # 如果未指定名称，使用序列号
+        if not name:
+            name = f"P{self._point_counter}"
+            self._point_counter += 1
+
         point = IRPoint(
             position=position.copy(),
             face_index=face_index,
@@ -385,7 +394,7 @@ class PathManager:
         if point_id in self.ir_points:
             self.ir_points[point_id].is_center = True
 
-    def compute_all_paths(self, smooth: bool = True) -> Dict[str, Tuple[List[int], np.ndarray]]:
+    def compute_all_paths(self, smooth: bool = True, exclude_point_ids: list = None) -> Dict[str, Tuple[List[int], np.ndarray]]:
         """
         计算所有IR点到中心点的路径
 
@@ -396,9 +405,13 @@ class PathManager:
 
         Args:
             smooth: 是否额外平滑（B样条）
+            exclude_point_ids: 要排除的点ID列表（如坐标原点）
         """
         self.paths.clear()
         self.smooth_paths.clear()
+
+        if exclude_point_ids is None:
+            exclude_point_ids = []
 
         print("\n" + "#"*60)
         print("# 开始计算路径")
@@ -428,10 +441,15 @@ class PathManager:
         ir_positions = {}
         print(f"\nIR点列表 (共 {len(self.ir_points)} 个):")
         for point_id, point in self.ir_points.items():
-            if point_id != self.center_point_id:
-                ir_positions[point_id] = point.position
-                dist = np.linalg.norm(point.position - center.position)
-                print(f"  {point.name} ({point_id[:8]}): {point.position}, 距中心: {dist:.2f}")
+            # 跳过中心点和排除的点
+            if point_id == self.center_point_id:
+                continue
+            if point_id in exclude_point_ids:
+                print(f"  {point.name} ({point_id[:8]}): 已排除（坐标原点）")
+                continue
+            ir_positions[point_id] = point.position
+            dist = np.linalg.norm(point.position - center.position)
+            print(f"  {point.name} ({point_id[:8]}): {point.position}, 距中心: {dist:.2f}")
 
         if not ir_positions:
             print("警告: 没有非中心点的IR点")

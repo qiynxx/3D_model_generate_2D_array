@@ -549,3 +549,529 @@ class BatchExporter:
             exported['project'] = str(project_path)
 
         return exported
+
+    @staticmethod
+    def export_coordinates(
+        filepath: str,
+        points_data: Dict[str, Dict],
+        origin_point_id: Optional[str] = None,
+        axis_rotation: Optional[List[float]] = None,
+        coordinate_system: str = "world"
+    ) -> bool:
+        """
+        导出点位坐标文件
+
+        Args:
+            filepath: 保存路径
+            points_data: 点位数据 {point_id: {name, position, is_center, pad_length, pad_width}}
+            origin_point_id: 原点的点ID（如果设置了局部坐标系）
+            axis_rotation: 轴旋转角度 [roll, pitch, yaw]（度）
+            coordinate_system: 坐标系类型 "world" 或 "local"
+
+        Returns:
+            是否成功
+        """
+        try:
+            # 计算旋转矩阵
+            R = np.eye(3)
+            if axis_rotation is not None and coordinate_system == "local":
+                roll, pitch, yaw = np.radians(axis_rotation)
+                cos_r, sin_r = np.cos(roll), np.sin(roll)
+                cos_p, sin_p = np.cos(pitch), np.sin(pitch)
+                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+
+                Rx = np.array([[1, 0, 0], [0, cos_r, -sin_r], [0, sin_r, cos_r]])
+                Ry = np.array([[cos_p, 0, sin_p], [0, 1, 0], [-sin_p, 0, cos_p]])
+                Rz = np.array([[cos_y, -sin_y, 0], [sin_y, cos_y, 0], [0, 0, 1]])
+                R = (Rz @ Ry @ Rx).T  # 逆旋转
+
+            # 获取原点
+            origin = np.zeros(3)
+            if origin_point_id and origin_point_id in points_data:
+                origin = np.array(points_data[origin_point_id]['position'])
+
+            # 构建坐标数据
+            coord_data = {
+                'coordinate_system': coordinate_system,
+                'origin_point_id': origin_point_id,
+                'origin_position': origin.tolist() if origin_point_id else None,
+                'axis_rotation': axis_rotation,
+                'points': []
+            }
+
+            for point_id, info in points_data.items():
+                pos = np.array(info['position'])
+
+                # 转换为局部坐标
+                if coordinate_system == "local" and origin_point_id:
+                    local_pos = R @ (pos - origin)
+                else:
+                    local_pos = pos
+
+                coord_data['points'].append({
+                    'id': point_id,
+                    'name': info.get('name', point_id),
+                    'is_center': info.get('is_center', False),
+                    'is_origin': point_id == origin_point_id,
+                    'world_position': pos.tolist(),
+                    'local_position': local_pos.tolist() if coordinate_system == "local" else None,
+                    'pad_length': info.get('pad_length', 3.0),
+                    'pad_width': info.get('pad_width', 2.0)
+                })
+
+            # 保存为JSON
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(coord_data, f, indent=2, ensure_ascii=False)
+
+            return True
+
+        except Exception as e:
+            print(f"导出坐标文件失败: {e}")
+            return False
+
+    @staticmethod
+    def export_coordinates_csv(
+        filepath: str,
+        points_data: Dict[str, Dict],
+        origin_point_id: Optional[str] = None,
+        axis_rotation: Optional[List[float]] = None,
+        coordinate_system: str = "world"
+    ) -> bool:
+        """
+        导出点位坐标为CSV格式
+
+        Args:
+            filepath: 保存路径
+            points_data: 点位数据
+            origin_point_id: 原点的点ID
+            axis_rotation: 轴旋转角度
+            coordinate_system: 坐标系类型
+
+        Returns:
+            是否成功
+        """
+        try:
+            # 计算旋转矩阵
+            R = np.eye(3)
+            if axis_rotation is not None and coordinate_system == "local":
+                roll, pitch, yaw = np.radians(axis_rotation)
+                cos_r, sin_r = np.cos(roll), np.sin(roll)
+                cos_p, sin_p = np.cos(pitch), np.sin(pitch)
+                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+
+                Rx = np.array([[1, 0, 0], [0, cos_r, -sin_r], [0, sin_r, cos_r]])
+                Ry = np.array([[cos_p, 0, sin_p], [0, 1, 0], [-sin_p, 0, cos_p]])
+                Rz = np.array([[cos_y, -sin_y, 0], [sin_y, cos_y, 0], [0, 0, 1]])
+                R = (Rz @ Ry @ Rx).T
+
+            # 获取原点
+            origin = np.zeros(3)
+            if origin_point_id and origin_point_id in points_data:
+                origin = np.array(points_data[origin_point_id]['position'])
+
+            lines = []
+            if coordinate_system == "local":
+                lines.append("名称,ID,X,Y,Z,世界X,世界Y,世界Z,是中心点,是原点,焊盘长度,焊盘宽度")
+            else:
+                lines.append("名称,ID,X,Y,Z,是中心点,是原点,焊盘长度,焊盘宽度")
+
+            for point_id, info in points_data.items():
+                pos = np.array(info['position'])
+                name = info.get('name', point_id)
+                is_center = "是" if info.get('is_center', False) else "否"
+                is_origin = "是" if point_id == origin_point_id else "否"
+                pad_l = info.get('pad_length', 3.0)
+                pad_w = info.get('pad_width', 2.0)
+
+                if coordinate_system == "local" and origin_point_id:
+                    local_pos = R @ (pos - origin)
+                    lines.append(
+                        f"{name},{point_id},{local_pos[0]:.4f},{local_pos[1]:.4f},{local_pos[2]:.4f},"
+                        f"{pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f},{is_center},{is_origin},{pad_l},{pad_w}"
+                    )
+                else:
+                    lines.append(
+                        f"{name},{point_id},{pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f},"
+                        f"{is_center},{is_origin},{pad_l},{pad_w}"
+                    )
+
+            with open(filepath, 'w', encoding='utf-8-sig') as f:
+                f.write('\n'.join(lines))
+
+            return True
+
+        except Exception as e:
+            print(f"导出坐标CSV失败: {e}")
+            return False
+
+
+class ProjectSnapshot:
+    """项目快照 - 完整保存和恢复项目状态"""
+
+    VERSION = "2.0"
+
+    @staticmethod
+    def save_snapshot(
+        filepath: str,
+        mesh_path: str,
+        ir_points_data: Dict,
+        groove_params: Dict,
+        fpc_params: Dict,
+        coord_system: Dict,
+        paths_data: Optional[Dict] = None,
+        additional_data: Optional[Dict] = None
+    ) -> bool:
+        """
+        保存项目快照
+
+        Args:
+            filepath: 保存路径（.irproj文件）
+            mesh_path: 原始网格文件路径
+            ir_points_data: IR点数据
+            groove_params: 凹槽参数
+            fpc_params: FPC参数
+            coord_system: 坐标系统设置
+            paths_data: 路径数据（可选）
+            additional_data: 其他数据（可选）
+
+        Returns:
+            是否成功
+        """
+        try:
+            import shutil
+            import zipfile
+            from datetime import datetime
+
+            # 创建临时目录
+            base_path = Path(filepath)
+            temp_dir = base_path.parent / f".{base_path.stem}_temp"
+            temp_dir.mkdir(exist_ok=True)
+
+            # 复制网格文件
+            mesh_file = Path(mesh_path)
+            if mesh_file.exists():
+                mesh_dest = temp_dir / f"mesh{mesh_file.suffix}"
+                shutil.copy2(mesh_path, mesh_dest)
+                relative_mesh_path = mesh_dest.name
+            else:
+                relative_mesh_path = None
+
+            # 序列化IR点位置（numpy数组转列表）
+            serialized_points = {}
+            for point_id, info in ir_points_data.items():
+                serialized_info = info.copy()
+                if 'position' in serialized_info and hasattr(serialized_info['position'], 'tolist'):
+                    serialized_info['position'] = serialized_info['position'].tolist()
+                serialized_points[point_id] = serialized_info
+
+            # 创建项目数据
+            project_data = {
+                'version': ProjectSnapshot.VERSION,
+                'created_at': datetime.now().isoformat(),
+                'mesh_path': relative_mesh_path,
+                'original_mesh_path': mesh_path,
+                'ir_points': serialized_points,
+                'groove_params': groove_params,
+                'fpc_params': fpc_params,
+                'coord_system': coord_system,
+            }
+
+            if paths_data:
+                # 序列化路径数据
+                serialized_paths = {}
+                for path_id, path in paths_data.items():
+                    if hasattr(path, 'tolist'):
+                        serialized_paths[path_id] = path.tolist()
+                    else:
+                        serialized_paths[path_id] = path
+                project_data['paths'] = serialized_paths
+
+            if additional_data:
+                project_data['additional'] = additional_data
+
+            # 保存项目JSON
+            project_json_path = temp_dir / "project.json"
+            with open(project_json_path, 'w', encoding='utf-8') as f:
+                json.dump(project_data, f, indent=2, ensure_ascii=False)
+
+            # 打包为zip文件
+            if filepath.endswith('.irproj'):
+                zip_path = filepath
+            else:
+                zip_path = filepath + '.irproj'
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for file in temp_dir.iterdir():
+                    zf.write(file, file.name)
+
+            # 清理临时目录
+            shutil.rmtree(temp_dir)
+
+            return True
+
+        except Exception as e:
+            print(f"保存项目快照失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    @staticmethod
+    def load_snapshot(filepath: str, extract_to: Optional[str] = None) -> Optional[Dict]:
+        """
+        加载项目快照
+
+        Args:
+            filepath: 快照文件路径
+            extract_to: 解压目录（可选，默认为临时目录）
+
+        Returns:
+            项目数据字典，包含：
+            - version: 版本号
+            - mesh_path: 网格文件路径（解压后的绝对路径）
+            - ir_points: IR点数据
+            - groove_params: 凹槽参数
+            - fpc_params: FPC参数
+            - coord_system: 坐标系统设置
+            - paths: 路径数据（如果有）
+        """
+        try:
+            import zipfile
+            import tempfile
+
+            if not Path(filepath).exists():
+                print(f"文件不存在: {filepath}")
+                return None
+
+            # 确定解压目录
+            if extract_to:
+                extract_dir = Path(extract_to)
+            else:
+                extract_dir = Path(tempfile.mkdtemp(prefix="irproj_"))
+
+            extract_dir.mkdir(parents=True, exist_ok=True)
+
+            # 解压
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                zf.extractall(extract_dir)
+
+            # 读取项目JSON
+            project_json_path = extract_dir / "project.json"
+            if not project_json_path.exists():
+                print("无效的项目文件：缺少project.json")
+                return None
+
+            with open(project_json_path, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+
+            # 更新网格路径为绝对路径
+            if project_data.get('mesh_path'):
+                mesh_path = extract_dir / project_data['mesh_path']
+                if mesh_path.exists():
+                    project_data['mesh_path'] = str(mesh_path)
+                elif project_data.get('original_mesh_path'):
+                    # 尝试使用原始路径
+                    if Path(project_data['original_mesh_path']).exists():
+                        project_data['mesh_path'] = project_data['original_mesh_path']
+
+            # 转换IR点位置回numpy数组
+            for point_id, info in project_data.get('ir_points', {}).items():
+                if 'position' in info and isinstance(info['position'], list):
+                    info['position'] = np.array(info['position'])
+
+            # 转换路径数据回numpy数组
+            if 'paths' in project_data:
+                for path_id, path in project_data['paths'].items():
+                    if isinstance(path, list):
+                        project_data['paths'][path_id] = np.array(path)
+
+            project_data['_extract_dir'] = str(extract_dir)
+
+            return project_data
+
+        except Exception as e:
+            print(f"加载项目快照失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+
+class FolderExporter:
+    """打包导出到文件夹"""
+
+    def __init__(self, output_dir: str, project_name: str = "ir_array_export"):
+        """
+        初始化文件夹导出器
+
+        Args:
+            output_dir: 输出目录
+            project_name: 项目名称（将创建同名子文件夹）
+        """
+        self.project_name = project_name
+        self.output_dir = Path(output_dir) / project_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 创建子目录
+        self.mesh_dir = self.output_dir / "meshes"
+        self.drawing_dir = self.output_dir / "drawings"
+        self.coord_dir = self.output_dir / "coordinates"
+        self.config_dir = self.output_dir / "config"
+
+        for d in [self.mesh_dir, self.drawing_dir, self.coord_dir, self.config_dir]:
+            d.mkdir(exist_ok=True)
+
+    def export_all(
+        self,
+        mesh: trimesh.Trimesh,
+        mesh_with_grooves: Optional[trimesh.Trimesh],
+        paths_2d: List[np.ndarray],
+        ir_points_2d: List[Tuple[np.ndarray, str]],
+        ir_points_data: Dict,
+        groove_params: Dict,
+        fpc_params: Dict,
+        coord_system: Dict,
+        fpc_layout: Optional[Dict] = None
+    ) -> Dict[str, str]:
+        """
+        导出所有文件到文件夹
+
+        Returns:
+            导出文件路径字典
+        """
+        exported = {}
+        name = self.project_name
+
+        # === 网格文件 ===
+        # 原始网格
+        mesh_path = self.mesh_dir / f"{name}_original.stl"
+        if Exporter.export_mesh(mesh, str(mesh_path)):
+            exported['original_mesh'] = str(mesh_path)
+
+        # 带凹槽的网格
+        if mesh_with_grooves is not None:
+            groove_mesh_path = self.mesh_dir / f"{name}_with_grooves.stl"
+            if Exporter.export_mesh(mesh_with_grooves, str(groove_mesh_path)):
+                exported['groove_mesh'] = str(groove_mesh_path)
+
+        # === 图纸文件 ===
+        # 2D路径 DXF
+        dxf_path = self.drawing_dir / f"{name}_2d_paths.dxf"
+        if Exporter.export_dxf(paths_2d, ir_points_2d, str(dxf_path)):
+            exported['dxf'] = str(dxf_path)
+
+        # 2D路径 SVG
+        svg_path = self.drawing_dir / f"{name}_2d_paths.svg"
+        if Exporter.export_svg(paths_2d, ir_points_2d, str(svg_path)):
+            exported['svg'] = str(svg_path)
+
+        # FPC布局图
+        if fpc_layout is not None:
+            groove_outlines = fpc_layout.get('groove_outlines', [])
+            ir_pads = fpc_layout.get('ir_pads', [])
+            center_pad = fpc_layout.get('center_pad')
+            merged_outline = fpc_layout.get('merged_outline')
+
+            if groove_outlines:
+                fpc_dxf_path = self.drawing_dir / f"{name}_fpc_layout.dxf"
+                if Exporter.export_fpc_dxf(
+                    groove_outlines, ir_pads, center_pad, merged_outline,
+                    ir_points_2d, str(fpc_dxf_path)
+                ):
+                    exported['fpc_dxf'] = str(fpc_dxf_path)
+
+                fpc_svg_path = self.drawing_dir / f"{name}_fpc_layout.svg"
+                if Exporter.export_fpc_svg(
+                    groove_outlines, ir_pads, center_pad, merged_outline,
+                    ir_points_2d, str(fpc_svg_path)
+                ):
+                    exported['fpc_svg'] = str(fpc_svg_path)
+
+        # === 坐标文件 ===
+        origin_id = coord_system.get('origin_point_id')
+        axis_rot = coord_system.get('axis_rotation')
+
+        # 世界坐标JSON
+        world_coord_path = self.coord_dir / f"{name}_world_coordinates.json"
+        if BatchExporter.export_coordinates(
+            str(world_coord_path), ir_points_data,
+            coordinate_system="world"
+        ):
+            exported['world_coord_json'] = str(world_coord_path)
+
+        # 世界坐标CSV
+        world_csv_path = self.coord_dir / f"{name}_world_coordinates.csv"
+        if BatchExporter.export_coordinates_csv(
+            str(world_csv_path), ir_points_data,
+            coordinate_system="world"
+        ):
+            exported['world_coord_csv'] = str(world_csv_path)
+
+        # 局部坐标（如果设置了原点）
+        if origin_id:
+            local_coord_path = self.coord_dir / f"{name}_local_coordinates.json"
+            if BatchExporter.export_coordinates(
+                str(local_coord_path), ir_points_data,
+                origin_point_id=origin_id,
+                axis_rotation=axis_rot,
+                coordinate_system="local"
+            ):
+                exported['local_coord_json'] = str(local_coord_path)
+
+            local_csv_path = self.coord_dir / f"{name}_local_coordinates.csv"
+            if BatchExporter.export_coordinates_csv(
+                str(local_csv_path), ir_points_data,
+                origin_point_id=origin_id,
+                axis_rotation=axis_rot,
+                coordinate_system="local"
+            ):
+                exported['local_coord_csv'] = str(local_csv_path)
+
+        # === 配置文件 ===
+        config_path = self.config_dir / f"{name}_config.json"
+        config_data = {
+            'groove_params': groove_params,
+            'fpc_params': fpc_params,
+            'coord_system': coord_system
+        }
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+        exported['config'] = str(config_path)
+
+        # 生成README
+        readme_path = self.output_dir / "README.txt"
+        readme_content = f"""IR阵列定位辅助生成工具 - 导出文件说明
+========================================
+
+项目名称: {name}
+导出时间: {Path(readme_path).stat().st_mtime if readme_path.exists() else 'N/A'}
+
+目录结构:
+---------
+meshes/          - 3D网格文件
+  ├── *_original.stl      - 原始网格
+  └── *_with_grooves.stl  - 带凹槽的网格
+
+drawings/        - 2D图纸文件
+  ├── *_2d_paths.dxf      - 2D路径DXF
+  ├── *_2d_paths.svg      - 2D路径SVG
+  ├── *_fpc_layout.dxf    - FPC布局DXF
+  └── *_fpc_layout.svg    - FPC布局SVG
+
+coordinates/     - 坐标文件
+  ├── *_world_coordinates.json  - 世界坐标(JSON)
+  ├── *_world_coordinates.csv   - 世界坐标(CSV)
+  ├── *_local_coordinates.json  - 局部坐标(JSON)
+  └── *_local_coordinates.csv   - 局部坐标(CSV)
+
+config/          - 配置文件
+  └── *_config.json       - 参数配置
+
+导出文件列表:
+{chr(10).join(f'  - {k}: {v}' for k, v in exported.items())}
+"""
+        with open(readme_path, 'w', encoding='utf-8') as f:
+            f.write(readme_content)
+
+        exported['readme'] = str(readme_path)
+        exported['output_dir'] = str(self.output_dir)
+
+        return exported

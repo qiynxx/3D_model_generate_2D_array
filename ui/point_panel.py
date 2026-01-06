@@ -1,7 +1,8 @@
 """点位管理面板"""
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QLabel, QGroupBox, QLineEdit, QComboBox, QMessageBox
+    QPushButton, QLabel, QGroupBox, QLineEdit, QComboBox, QMessageBox,
+    QDoubleSpinBox
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from typing import Dict, Optional
@@ -18,12 +19,14 @@ class PointPanel(QWidget):
     picking_toggled = pyqtSignal(bool)  # 拾取模式切换
     paths_requested = pyqtSignal()  # 请求生成路径
     group_changed = pyqtSignal(str, str)  # (point_id, group_name)
+    pad_size_changed = pyqtSignal(str, float, float)  # (point_id, length, width)
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self.points: Dict[str, dict] = {}  # id -> point_info
         self.current_center_id: Optional[str] = None
+        self.origin_point_id: Optional[str] = None  # 坐标原点ID
 
         self._setup_ui()
 
@@ -87,6 +90,34 @@ class PointPanel(QWidget):
         self.btn_set_center.clicked.connect(self._on_set_center_clicked)
         info_layout.addWidget(self.btn_set_center)
 
+        # 焊盘尺寸设置
+        pad_group = QGroupBox("焊盘尺寸")
+        pad_layout = QVBoxLayout(pad_group)
+
+        # 焊盘长度
+        pad_length_layout = QHBoxLayout()
+        pad_length_layout.addWidget(QLabel("长度 (mm):"))
+        self.pad_length_spin = QDoubleSpinBox()
+        self.pad_length_spin.setRange(1.0, 20.0)
+        self.pad_length_spin.setValue(3.0)
+        self.pad_length_spin.setSingleStep(0.5)
+        self.pad_length_spin.valueChanged.connect(self._on_pad_size_changed)
+        pad_length_layout.addWidget(self.pad_length_spin)
+        pad_layout.addLayout(pad_length_layout)
+
+        # 焊盘宽度
+        pad_width_layout = QHBoxLayout()
+        pad_width_layout.addWidget(QLabel("宽度 (mm):"))
+        self.pad_width_spin = QDoubleSpinBox()
+        self.pad_width_spin.setRange(1.0, 20.0)
+        self.pad_width_spin.setValue(2.0)
+        self.pad_width_spin.setSingleStep(0.5)
+        self.pad_width_spin.valueChanged.connect(self._on_pad_size_changed)
+        pad_width_layout.addWidget(self.pad_width_spin)
+        pad_layout.addLayout(pad_width_layout)
+
+        info_layout.addWidget(pad_group)
+
         layout.addWidget(info_group)
 
         # 生成路径按钮
@@ -117,7 +148,9 @@ class PointPanel(QWidget):
         position: np.ndarray,
         name: str = "",
         is_center: bool = False,
-        group: str = "default"
+        group: str = "default",
+        pad_length: float = 3.0,
+        pad_width: float = 2.0
     ):
         """添加点到列表"""
         self.points[point_id] = {
@@ -125,7 +158,9 @@ class PointPanel(QWidget):
             'position': position,
             'name': name if name else f"IR_{point_id[:4]}",
             'is_center': is_center,
-            'group': group
+            'group': group,
+            'pad_length': pad_length,
+            'pad_width': pad_width
         }
 
         item = QListWidgetItem()
@@ -193,6 +228,14 @@ class PointPanel(QWidget):
                     self.group_combo.setCurrentText(info['group'])
                     pos = info['position']
                     self.coord_label.setText(f"坐标: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+
+                    # 更新焊盘尺寸显示
+                    self.pad_length_spin.blockSignals(True)
+                    self.pad_width_spin.blockSignals(True)
+                    self.pad_length_spin.setValue(info.get('pad_length', 3.0))
+                    self.pad_width_spin.setValue(info.get('pad_width', 2.0))
+                    self.pad_length_spin.blockSignals(False)
+                    self.pad_width_spin.blockSignals(False)
                 break
 
     def _update_item_text(self, item: QListWidgetItem, point_id: str):
@@ -201,12 +244,22 @@ class PointPanel(QWidget):
         name = info.get('name', point_id)
         group = info.get('group', 'default')
         is_center = info.get('is_center', False)
+        is_origin = (point_id == self.origin_point_id)
 
-        text = f"{'★ ' if is_center else ''}{name} [{group}]"
+        # 构建前缀标记
+        prefix = ""
+        if is_origin:
+            prefix += "◎ "  # 原点标记
+        if is_center:
+            prefix += "★ "  # 中心点标记
+
+        text = f"{prefix}{name} [{group}]"
         item.setText(text)
 
-        # 设置颜色
-        if is_center:
+        # 设置颜色（原点用金色，中心点用红色）
+        if is_origin:
+            item.setForeground(Qt.yellow)  # 坐标原点用黄色
+        elif is_center:
             item.setForeground(Qt.red)
         else:
             item.setForeground(Qt.white)
@@ -224,7 +277,13 @@ class PointPanel(QWidget):
         center_name = "未设置"
         if self.current_center_id and self.current_center_id in self.points:
             center_name = self.points[self.current_center_id]['name']
-        self.stats_label.setText(f"点数: {count} | 中心点: {center_name}")
+
+        # 计算参与路径生成的点数（排除原点）
+        active_count = count
+        if self.origin_point_id and self.origin_point_id in self.points:
+            active_count -= 1
+
+        self.stats_label.setText(f"点数: {count} (路径点: {active_count}) | 中心点: {center_name}")
 
     def _on_add_clicked(self, checked: bool):
         """添加按钮点击"""
@@ -263,6 +322,15 @@ class PointPanel(QWidget):
             self.group_combo.setCurrentText(info['group'])
             pos = info['position']
             self.coord_label.setText(f"坐标: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
+
+            # 更新焊盘尺寸显示
+            self.pad_length_spin.blockSignals(True)
+            self.pad_width_spin.blockSignals(True)
+            self.pad_length_spin.setValue(info.get('pad_length', 3.0))
+            self.pad_width_spin.setValue(info.get('pad_width', 2.0))
+            self.pad_length_spin.blockSignals(False)
+            self.pad_width_spin.blockSignals(False)
+
             self.point_selected.emit(point_id)
 
     def _on_item_double_clicked(self, item: QListWidgetItem):
@@ -297,6 +365,16 @@ class PointPanel(QWidget):
             self._refresh_list()
             self.group_changed.emit(point_id, group)
 
+    def _on_pad_size_changed(self):
+        """焊盘尺寸变更"""
+        point_id = self.get_selected_point_id()
+        if point_id and point_id in self.points:
+            length = self.pad_length_spin.value()
+            width = self.pad_width_spin.value()
+            self.points[point_id]['pad_length'] = length
+            self.points[point_id]['pad_width'] = width
+            self.pad_size_changed.emit(point_id, length, width)
+
     def _on_generate_clicked(self):
         """生成路径按钮点击"""
         if not self.current_center_id:
@@ -312,4 +390,28 @@ class PointPanel(QWidget):
         self.points.clear()
         self.list_widget.clear()
         self.current_center_id = None
+        self._update_stats()
+
+    def get_point_pad_sizes(self) -> Dict[str, tuple]:
+        """获取所有点的焊盘尺寸
+
+        Returns:
+            Dict[str, tuple]: {point_id: (pad_length, pad_width)}
+        """
+        result = {}
+        for point_id, info in self.points.items():
+            result[point_id] = (
+                info.get('pad_length', 3.0),
+                info.get('pad_width', 2.0)
+            )
+        return result
+
+    def set_origin_point(self, point_id: Optional[str]):
+        """设置坐标原点
+
+        Args:
+            point_id: 原点ID，None表示清除原点
+        """
+        self.origin_point_id = point_id
+        self._refresh_list()
         self._update_stats()

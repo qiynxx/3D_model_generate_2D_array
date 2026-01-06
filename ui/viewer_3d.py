@@ -50,6 +50,11 @@ class Viewer3D(QWidget):
         # 当前选中的IR点
         self.selected_ir_point_id: Optional[str] = None
 
+        # 坐标轴相关
+        self._coord_axis_actors = {}  # 坐标轴actor
+        self._coord_axes_visible = False
+        self._origin_highlight_actor = None
+
         # 拾取回调
         self.picker_callback = PickerCallback()
         self.picking_enabled = False
@@ -734,3 +739,215 @@ class Viewer3D(QWidget):
     def screenshot(self, filename: str):
         """保存截图"""
         self.plotter.screenshot(filename)
+
+    def add_coordinate_axes(
+        self,
+        origin: np.ndarray,
+        x_axis: np.ndarray,
+        y_axis: np.ndarray,
+        z_axis: np.ndarray,
+        length: float = 3.0,
+        shaft_scale: float = 1.0,
+        tip_scale: float = 1.0
+    ):
+        """添加自定义坐标轴箭头
+
+        Args:
+            origin: 原点位置
+            x_axis: X轴方向向量（单位向量）
+            y_axis: Y轴方向向量（单位向量）
+            z_axis: Z轴方向向量（单位向量）
+            length: 箭头长度
+            shaft_scale: 箭头杆粗细缩放 (1.0 = 默认)
+            tip_scale: 箭头头部大小缩放 (1.0 = 默认)
+        """
+        # 先移除旧的坐标轴
+        self.remove_coordinate_axes()
+
+        # 计算箭头参数（使用固定基础值，不随长度变化）
+        # 基础值保持轴的粗细恒定，只有shaft_scale和tip_scale影响粗细
+        base_shaft_radius = 0.05 * shaft_scale  # 固定的轴半径
+        base_tip_radius = 0.12 * tip_scale      # 固定的箭头头部半径
+        base_tip_length = 0.25 * tip_scale      # 固定的箭头尖端长度
+
+        shaft_radius = base_shaft_radius
+        tip_radius = base_tip_radius
+        tip_length = base_tip_length
+
+        # X轴 - 红色
+        x_end = origin + x_axis * length
+        x_arrow = pv.Arrow(
+            start=origin,
+            direction=x_axis,
+            scale=length,
+            shaft_radius=shaft_radius,
+            tip_radius=tip_radius,
+            tip_length=tip_length
+        )
+        self._coord_axis_actors['x'] = self.plotter.add_mesh(
+            x_arrow,
+            name='coord_axis_x',
+            color='#ff0000',
+            opacity=0.9,
+            pickable=False
+        )
+
+        # Y轴 - 绿色
+        y_arrow = pv.Arrow(
+            start=origin,
+            direction=y_axis,
+            scale=length,
+            shaft_radius=shaft_radius,
+            tip_radius=tip_radius,
+            tip_length=tip_length
+        )
+        self._coord_axis_actors['y'] = self.plotter.add_mesh(
+            y_arrow,
+            name='coord_axis_y',
+            color='#00ff00',
+            opacity=0.9,
+            pickable=False
+        )
+
+        # Z轴 - 蓝色
+        z_arrow = pv.Arrow(
+            start=origin,
+            direction=z_axis,
+            scale=length,
+            shaft_radius=shaft_radius,
+            tip_radius=tip_radius,
+            tip_length=tip_length
+        )
+        self._coord_axis_actors['z'] = self.plotter.add_mesh(
+            z_arrow,
+            name='coord_axis_z',
+            color='#0000ff',
+            opacity=0.9,
+            pickable=False
+        )
+
+        # 添加轴标签
+        label_offset = length * 1.1
+        try:
+            self.plotter.add_point_labels(
+                [origin + x_axis * label_offset],
+                ['X'],
+                name='coord_label_x',
+                font_size=14,
+                text_color='#ff0000',
+                point_size=0,
+                shape_opacity=0,
+                bold=True
+            )
+            self.plotter.add_point_labels(
+                [origin + y_axis * label_offset],
+                ['Y'],
+                name='coord_label_y',
+                font_size=14,
+                text_color='#00ff00',
+                point_size=0,
+                shape_opacity=0,
+                bold=True
+            )
+            self.plotter.add_point_labels(
+                [origin + z_axis * label_offset],
+                ['Z'],
+                name='coord_label_z',
+                font_size=14,
+                text_color='#0000ff',
+                point_size=0,
+                shape_opacity=0,
+                bold=True
+            )
+        except:
+            pass  # 标签可能因为字体问题失败
+
+        # 添加原点标记
+        origin_sphere = pv.Sphere(radius=length * 0.04, center=origin)
+        self._coord_axis_actors['origin'] = self.plotter.add_mesh(
+            origin_sphere,
+            name='coord_origin',
+            color='#ffffff',
+            opacity=1.0,
+            pickable=False
+        )
+
+        self._coord_axes_visible = True
+        self.plotter.render()
+
+    def update_coordinate_axes(
+        self,
+        origin: np.ndarray,
+        x_axis: np.ndarray,
+        y_axis: np.ndarray,
+        z_axis: np.ndarray,
+        length: float = 3.0,
+        shaft_scale: float = 1.0,
+        tip_scale: float = 1.0
+    ):
+        """更新坐标轴（重新绘制）"""
+        if self._coord_axes_visible:
+            self.add_coordinate_axes(origin, x_axis, y_axis, z_axis, length, shaft_scale, tip_scale)
+
+    def remove_coordinate_axes(self):
+        """移除坐标轴"""
+        for key, actor in list(self._coord_axis_actors.items()):
+            try:
+                self.plotter.remove_actor(actor)
+            except:
+                pass
+        self._coord_axis_actors.clear()
+
+        # 移除标签
+        for label_name in ['coord_label_x', 'coord_label_y', 'coord_label_z', 'coord_origin']:
+            try:
+                self.plotter.remove_actor(label_name)
+            except:
+                pass
+
+        self._coord_axes_visible = False
+
+    def set_coordinate_axes_visible(self, visible: bool):
+        """设置坐标轴可见性"""
+        if visible and not self._coord_axes_visible:
+            # 需要重新添加
+            pass
+        elif not visible and self._coord_axes_visible:
+            self.remove_coordinate_axes()
+
+    def highlight_origin_point(self, point_id: str, position: np.ndarray):
+        """高亮显示原点
+
+        Args:
+            point_id: 点ID
+            position: 点位置
+        """
+        # 移除旧的原点高亮
+        self.remove_origin_highlight()
+
+        if self.mesh is not None:
+            bounds = self.mesh.bounds
+            size = np.linalg.norm(bounds[1] - bounds[0])
+            radius = size * 0.015
+        else:
+            radius = 0.8
+
+        # 创建高亮环
+        ring = pv.Disc(center=position, inner=radius * 0.8, outer=radius * 1.2, normal=(0, 0, 1))
+        self._origin_highlight_actor = self.plotter.add_mesh(
+            ring,
+            name='origin_highlight',
+            color='#ffd700',  # 金色
+            opacity=0.8,
+            pickable=False
+        )
+        self.plotter.render()
+
+    def remove_origin_highlight(self):
+        """移除原点高亮"""
+        if self._origin_highlight_actor is not None:
+            try:
+                self.plotter.remove_actor(self._origin_highlight_actor)
+            except:
+                pass
+            self._origin_highlight_actor = None

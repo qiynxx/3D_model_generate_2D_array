@@ -2,7 +2,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
     QCheckBox, QGroupBox, QPushButton, QTabWidget, QSlider,
-    QProgressBar, QFileDialog, QMessageBox
+    QProgressBar, QFileDialog, QMessageBox, QScrollArea, QLineEdit
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from dataclasses import dataclass
@@ -16,6 +16,12 @@ class GrooveParams:
     auto_width: bool = True
     min_width: float = 0.5
     max_width: float = 5.0
+    conform_to_surface: bool = True  # 曲面贴合模式
+    extension_height: float = 0.5  # 向表面外延伸高度
+    # 方形焊盘参数
+    pad_enabled: bool = True  # 是否生成方形焊盘
+    pad_length: float = 3.0   # 方形长度（沿路径方向）
+    pad_width: float = 2.0    # 方形宽度（垂直于路径）
 
 
 @dataclass
@@ -42,6 +48,8 @@ class ParamPanel(QWidget):
     flatten_clicked = pyqtSignal()
     generate_fpc_layout_clicked = pyqtSignal()  # 新增：生成FPC布局图
     export_all_clicked = pyqtSignal()
+    # 单独导出信号
+    export_single_clicked = pyqtSignal(str)  # 导出类型
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,8 +91,14 @@ class ParamPanel(QWidget):
 
     def _create_groove_tab(self) -> QWidget:
         """创建凹槽设置选项卡"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        # 内容容器
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
 
         # 宽度
         width_group = QGroupBox("宽度设置")
@@ -126,10 +140,11 @@ class ParamPanel(QWidget):
 
         layout.addWidget(width_group)
 
-        # 深度
+        # 深度设置
         depth_group = QGroupBox("深度设置")
         depth_layout = QVBoxLayout(depth_group)
 
+        # 凹槽深度
         depth_spin_layout = QHBoxLayout()
         depth_spin_layout.addWidget(QLabel("凹槽深度 (mm):"))
         self.depth_spin = QDoubleSpinBox()
@@ -149,7 +164,90 @@ class ParamPanel(QWidget):
         )
         depth_layout.addWidget(self.depth_slider)
 
+        # 向外延伸高度
+        ext_height_layout = QHBoxLayout()
+        ext_height_layout.addWidget(QLabel("向外延伸 (mm):"))
+        self.ext_height_spin = QDoubleSpinBox()
+        self.ext_height_spin.setRange(0.01, 5.0)
+        self.ext_height_spin.setValue(0.5)
+        self.ext_height_spin.setSingleStep(0.1)
+        self.ext_height_spin.setToolTip(
+            "凹槽向表面外延伸的高度，\n"
+            "用于确保布尔运算能完全切穿表面"
+        )
+        self.ext_height_spin.valueChanged.connect(self._on_params_changed)
+        ext_height_layout.addWidget(self.ext_height_spin)
+        depth_layout.addLayout(ext_height_layout)
+
+        ext_info = QLabel("确保凹槽切穿表面的延伸量")
+        ext_info.setStyleSheet("color: gray; font-size: 10px;")
+        depth_layout.addWidget(ext_info)
+
         layout.addWidget(depth_group)
+
+        # 曲面贴合设置
+        conform_group = QGroupBox("曲面贴合")
+        conform_layout = QVBoxLayout(conform_group)
+
+        self.conform_surface_check = QCheckBox("启用曲面贴合模式")
+        self.conform_surface_check.setChecked(True)
+        self.conform_surface_check.setToolTip(
+            "启用后，凹槽边界将精确贴合曲面，\n"
+            "FPC可以完美嵌入凹槽中。\n"
+            "禁用则使用简单的平面凹槽。"
+        )
+        self.conform_surface_check.stateChanged.connect(self._on_params_changed)
+        conform_layout.addWidget(self.conform_surface_check)
+
+        conform_info = QLabel("凹槽边界将精确贴合3D曲面")
+        conform_info.setStyleSheet("color: gray; font-size: 10px;")
+        conform_layout.addWidget(conform_info)
+
+        layout.addWidget(conform_group)
+
+        # 方形焊盘设置
+        pad_group = QGroupBox("方形焊盘凹槽")
+        pad_layout = QVBoxLayout(pad_group)
+
+        # 启用方形焊盘
+        self.pad_enabled_check = QCheckBox("在IR点位置生成方形凹槽")
+        self.pad_enabled_check.setChecked(True)
+        self.pad_enabled_check.setToolTip(
+            "启用后，在每个IR点位置生成方形凹槽，\n"
+            "路径凹槽将垂直连接到方形边缘。"
+        )
+        self.pad_enabled_check.stateChanged.connect(self._on_pad_enabled_changed)
+        pad_layout.addWidget(self.pad_enabled_check)
+
+        # 方形长度（沿路径方向）
+        pad_length_layout = QHBoxLayout()
+        pad_length_layout.addWidget(QLabel("长度 (mm):"))
+        self.pad_length_spin = QDoubleSpinBox()
+        self.pad_length_spin.setRange(1.0, 20.0)
+        self.pad_length_spin.setValue(3.0)
+        self.pad_length_spin.setSingleStep(0.5)
+        self.pad_length_spin.setToolTip("方形凹槽沿路径方向的长度")
+        self.pad_length_spin.valueChanged.connect(self._on_params_changed)
+        pad_length_layout.addWidget(self.pad_length_spin)
+        pad_layout.addLayout(pad_length_layout)
+
+        # 方形宽度（垂直于路径）
+        pad_width_layout = QHBoxLayout()
+        pad_width_layout.addWidget(QLabel("宽度 (mm):"))
+        self.pad_width_spin = QDoubleSpinBox()
+        self.pad_width_spin.setRange(1.0, 20.0)
+        self.pad_width_spin.setValue(2.0)
+        self.pad_width_spin.setSingleStep(0.5)
+        self.pad_width_spin.setToolTip("方形凹槽垂直于路径的宽度")
+        self.pad_width_spin.valueChanged.connect(self._on_params_changed)
+        pad_width_layout.addWidget(self.pad_width_spin)
+        pad_layout.addLayout(pad_width_layout)
+
+        pad_info = QLabel("路径与方形边缘垂直连接")
+        pad_info.setStyleSheet("color: gray; font-size: 10px;")
+        pad_layout.addWidget(pad_info)
+
+        layout.addWidget(pad_group)
 
         # 生成按钮
         self.btn_generate_grooves = QPushButton("生成凹槽预览")
@@ -170,7 +268,10 @@ class ParamPanel(QWidget):
         layout.addWidget(self.btn_generate_grooves)
 
         layout.addStretch()
-        return widget
+
+        # 设置滚动区域内容
+        scroll_area.setWidget(content_widget)
+        return scroll_area
 
     def _create_flatten_tab(self) -> QWidget:
         """创建展开设置选项卡"""
@@ -284,8 +385,22 @@ class ParamPanel(QWidget):
 
     def _create_export_tab(self) -> QWidget:
         """创建导出设置选项卡"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        # 使用滚动区域支持更多内容
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+
+        # 项目名称
+        name_group = QGroupBox("项目名称")
+        name_layout = QHBoxLayout(name_group)
+        self.project_name_edit = QLineEdit()
+        self.project_name_edit.setPlaceholderText("输入项目名称")
+        self.project_name_edit.setText("ir_array_export")
+        name_layout.addWidget(self.project_name_edit)
+        layout.addWidget(name_group)
 
         # 输出目录
         dir_group = QGroupBox("输出目录")
@@ -301,42 +416,142 @@ class ParamPanel(QWidget):
 
         layout.addWidget(dir_group)
 
-        # 输出文件
-        files_group = QGroupBox("输出文件")
-        files_layout = QVBoxLayout(files_group)
+        # 3D模型文件
+        mesh_group = QGroupBox("3D模型")
+        mesh_layout = QVBoxLayout(mesh_group)
 
-        self.export_stl = QCheckBox("3D模型 (STL)")
+        stl_row = QHBoxLayout()
+        self.export_stl = QCheckBox("原始模型 (STL)")
         self.export_stl.setChecked(True)
-        files_layout.addWidget(self.export_stl)
+        stl_row.addWidget(self.export_stl)
+        self.btn_save_stl = QPushButton("单独保存")
+        self.btn_save_stl.setFixedWidth(80)
+        self.btn_save_stl.clicked.connect(lambda: self._on_single_export("stl"))
+        stl_row.addWidget(self.btn_save_stl)
+        mesh_layout.addLayout(stl_row)
 
-        self.export_groove_stl = QCheckBox("带凹槽的3D模型 (STL)")
+        groove_stl_row = QHBoxLayout()
+        self.export_groove_stl = QCheckBox("带凹槽模型 (STL)")
         self.export_groove_stl.setChecked(True)
-        files_layout.addWidget(self.export_groove_stl)
+        groove_stl_row.addWidget(self.export_groove_stl)
+        self.btn_save_groove_stl = QPushButton("单独保存")
+        self.btn_save_groove_stl.setFixedWidth(80)
+        self.btn_save_groove_stl.clicked.connect(lambda: self._on_single_export("groove_stl"))
+        groove_stl_row.addWidget(self.btn_save_groove_stl)
+        mesh_layout.addLayout(groove_stl_row)
 
+        layout.addWidget(mesh_group)
+
+        # 2D图纸
+        drawing_group = QGroupBox("2D图纸")
+        drawing_layout = QVBoxLayout(drawing_group)
+
+        dxf_row = QHBoxLayout()
         self.export_dxf = QCheckBox("2D路径 (DXF)")
         self.export_dxf.setChecked(True)
-        files_layout.addWidget(self.export_dxf)
+        dxf_row.addWidget(self.export_dxf)
+        self.btn_save_dxf = QPushButton("单独保存")
+        self.btn_save_dxf.setFixedWidth(80)
+        self.btn_save_dxf.clicked.connect(lambda: self._on_single_export("dxf"))
+        dxf_row.addWidget(self.btn_save_dxf)
+        drawing_layout.addLayout(dxf_row)
 
+        svg_row = QHBoxLayout()
         self.export_svg = QCheckBox("2D路径 (SVG)")
         self.export_svg.setChecked(False)
-        files_layout.addWidget(self.export_svg)
+        svg_row.addWidget(self.export_svg)
+        self.btn_save_svg = QPushButton("单独保存")
+        self.btn_save_svg.setFixedWidth(80)
+        self.btn_save_svg.clicked.connect(lambda: self._on_single_export("svg"))
+        svg_row.addWidget(self.btn_save_svg)
+        drawing_layout.addLayout(svg_row)
 
+        fpc_dxf_row = QHBoxLayout()
         self.export_fpc_dxf = QCheckBox("FPC图纸 (DXF)")
         self.export_fpc_dxf.setChecked(True)
-        files_layout.addWidget(self.export_fpc_dxf)
+        fpc_dxf_row.addWidget(self.export_fpc_dxf)
+        self.btn_save_fpc_dxf = QPushButton("单独保存")
+        self.btn_save_fpc_dxf.setFixedWidth(80)
+        self.btn_save_fpc_dxf.clicked.connect(lambda: self._on_single_export("fpc_dxf"))
+        fpc_dxf_row.addWidget(self.btn_save_fpc_dxf)
+        drawing_layout.addLayout(fpc_dxf_row)
 
+        fpc_svg_row = QHBoxLayout()
         self.export_fpc_svg = QCheckBox("FPC图纸 (SVG)")
         self.export_fpc_svg.setChecked(True)
-        files_layout.addWidget(self.export_fpc_svg)
+        fpc_svg_row.addWidget(self.export_fpc_svg)
+        self.btn_save_fpc_svg = QPushButton("单独保存")
+        self.btn_save_fpc_svg.setFixedWidth(80)
+        self.btn_save_fpc_svg.clicked.connect(lambda: self._on_single_export("fpc_svg"))
+        fpc_svg_row.addWidget(self.btn_save_fpc_svg)
+        drawing_layout.addLayout(fpc_svg_row)
 
+        layout.addWidget(drawing_group)
+
+        # 坐标文件
+        coord_group = QGroupBox("坐标文件")
+        coord_layout = QVBoxLayout(coord_group)
+
+        world_json_row = QHBoxLayout()
+        self.export_world_json = QCheckBox("世界坐标 (JSON)")
+        self.export_world_json.setChecked(True)
+        world_json_row.addWidget(self.export_world_json)
+        self.btn_save_world_json = QPushButton("单独保存")
+        self.btn_save_world_json.setFixedWidth(80)
+        self.btn_save_world_json.clicked.connect(lambda: self._on_single_export("world_json"))
+        world_json_row.addWidget(self.btn_save_world_json)
+        coord_layout.addLayout(world_json_row)
+
+        world_csv_row = QHBoxLayout()
+        self.export_world_csv = QCheckBox("世界坐标 (CSV)")
+        self.export_world_csv.setChecked(True)
+        world_csv_row.addWidget(self.export_world_csv)
+        self.btn_save_world_csv = QPushButton("单独保存")
+        self.btn_save_world_csv.setFixedWidth(80)
+        self.btn_save_world_csv.clicked.connect(lambda: self._on_single_export("world_csv"))
+        world_csv_row.addWidget(self.btn_save_world_csv)
+        coord_layout.addLayout(world_csv_row)
+
+        local_json_row = QHBoxLayout()
+        self.export_local_json = QCheckBox("局部坐标 (JSON)")
+        self.export_local_json.setChecked(True)
+        local_json_row.addWidget(self.export_local_json)
+        self.btn_save_local_json = QPushButton("单独保存")
+        self.btn_save_local_json.setFixedWidth(80)
+        self.btn_save_local_json.clicked.connect(lambda: self._on_single_export("local_json"))
+        local_json_row.addWidget(self.btn_save_local_json)
+        coord_layout.addLayout(local_json_row)
+
+        local_csv_row = QHBoxLayout()
+        self.export_local_csv = QCheckBox("局部坐标 (CSV)")
+        self.export_local_csv.setChecked(True)
+        local_csv_row.addWidget(self.export_local_csv)
+        self.btn_save_local_csv = QPushButton("单独保存")
+        self.btn_save_local_csv.setFixedWidth(80)
+        self.btn_save_local_csv.clicked.connect(lambda: self._on_single_export("local_csv"))
+        local_csv_row.addWidget(self.btn_save_local_csv)
+        coord_layout.addLayout(local_csv_row)
+
+        layout.addWidget(coord_group)
+
+        # 配置文件
+        config_group = QGroupBox("配置文件")
+        config_layout = QVBoxLayout(config_group)
+
+        project_row = QHBoxLayout()
         self.export_project = QCheckBox("项目配置 (JSON)")
         self.export_project.setChecked(True)
-        files_layout.addWidget(self.export_project)
+        project_row.addWidget(self.export_project)
+        self.btn_save_project = QPushButton("单独保存")
+        self.btn_save_project.setFixedWidth(80)
+        self.btn_save_project.clicked.connect(lambda: self._on_single_export("project"))
+        project_row.addWidget(self.btn_save_project)
+        config_layout.addLayout(project_row)
 
-        layout.addWidget(files_group)
+        layout.addWidget(config_group)
 
         # 一键导出按钮
-        self.btn_export_all = QPushButton("一键保存所有文件")
+        self.btn_export_all = QPushButton("一键保存所有文件到项目文件夹")
         self.btn_export_all.setStyleSheet("""
             QPushButton {
                 background-color: #27ae60;
@@ -352,14 +567,29 @@ class ParamPanel(QWidget):
         self.btn_export_all.clicked.connect(self._on_export_all_clicked)
         layout.addWidget(self.btn_export_all)
 
+        # 提示信息
+        hint_label = QLabel("一键保存将创建以项目名称命名的文件夹，包含所有选中的文件")
+        hint_label.setStyleSheet("color: gray; font-size: 10px;")
+        hint_label.setWordWrap(True)
+        layout.addWidget(hint_label)
+
         layout.addStretch()
-        return widget
+
+        scroll_area.setWidget(content_widget)
+        return scroll_area
 
     def _on_auto_width_changed(self, state: int):
         """自动宽度复选框变更"""
         enabled = state != Qt.Checked
         self.min_width_spin.setEnabled(enabled)
         self.max_width_spin.setEnabled(enabled)
+        self._on_params_changed()
+
+    def _on_pad_enabled_changed(self, state: int):
+        """方形焊盘启用状态变更"""
+        enabled = state == Qt.Checked
+        self.pad_length_spin.setEnabled(enabled)
+        self.pad_width_spin.setEnabled(enabled)
         self._on_params_changed()
 
     def _on_params_changed(self):
@@ -369,6 +599,12 @@ class ParamPanel(QWidget):
         self.groove_params.auto_width = self.auto_width_check.isChecked()
         self.groove_params.min_width = self.min_width_spin.value()
         self.groove_params.max_width = self.max_width_spin.value()
+        self.groove_params.conform_to_surface = self.conform_surface_check.isChecked()
+        self.groove_params.extension_height = self.ext_height_spin.value()
+        # 方形焊盘参数
+        self.groove_params.pad_enabled = self.pad_enabled_check.isChecked()
+        self.groove_params.pad_length = self.pad_length_spin.value()
+        self.groove_params.pad_width = self.pad_width_spin.value()
 
         self.groove_params_changed.emit(self.groove_params)
 
@@ -397,6 +633,33 @@ class ParamPanel(QWidget):
                 return
 
         self.export_all_clicked.emit()
+
+    def _on_single_export(self, export_type: str):
+        """单独导出某类型文件"""
+        self.export_single_clicked.emit(export_type)
+
+    def get_project_name(self) -> str:
+        """获取项目名称"""
+        name = self.project_name_edit.text().strip()
+        if not name:
+            name = "ir_array_export"
+        return name
+
+    def get_export_options(self) -> dict:
+        """获取导出选项"""
+        return {
+            'stl': self.export_stl.isChecked(),
+            'groove_stl': self.export_groove_stl.isChecked(),
+            'dxf': self.export_dxf.isChecked(),
+            'svg': self.export_svg.isChecked(),
+            'fpc_dxf': self.export_fpc_dxf.isChecked(),
+            'fpc_svg': self.export_fpc_svg.isChecked(),
+            'world_json': self.export_world_json.isChecked(),
+            'world_csv': self.export_world_csv.isChecked(),
+            'local_json': self.export_local_json.isChecked(),
+            'local_csv': self.export_local_csv.isChecked(),
+            'project': self.export_project.isChecked()
+        }
 
     def get_groove_params(self) -> GrooveParams:
         """获取凹槽参数"""

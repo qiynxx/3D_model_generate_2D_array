@@ -865,7 +865,8 @@ class FPCLayoutResult:
     groove_outlines: Dict[str, np.ndarray]  # point_id -> 凹槽轮廓（闭合多边形）
     merged_outline: Optional[np.ndarray]  # 合并后的总轮廓
     center_pad: np.ndarray  # 中心焊盘轮廓
-    ir_pads: Dict[str, np.ndarray]  # point_id -> IR点焊盘轮廓
+    ir_pads: Dict[str, np.ndarray]  # point_id -> IR点焊盘轮廓（圆形或方形）
+    rectangular_pads: Dict[str, np.ndarray]  # point_id -> 方形焊盘轮廓
     total_bounds: Tuple[np.ndarray, np.ndarray]  # 边界
 
 
@@ -977,6 +978,49 @@ def create_rectangular_pad(center: np.ndarray, width: float, height: float) -> n
     ])
 
 
+def create_oriented_rectangular_pad(
+    center: np.ndarray,
+    length: float,
+    width: float,
+    direction: np.ndarray
+) -> np.ndarray:
+    """
+    创建带方向的矩形焊盘轮廓
+
+    Args:
+        center: 中心点坐标 (2,)
+        length: 长度（沿方向）
+        width: 宽度（垂直于方向）
+        direction: 方向向量 (2,)
+
+    Returns:
+        矩形轮廓点（逆时针）
+    """
+    # 归一化方向向量
+    dir_norm = np.linalg.norm(direction)
+    if dir_norm < 1e-10:
+        # 默认方向
+        forward = np.array([1.0, 0.0])
+    else:
+        forward = direction / dir_norm
+
+    # 垂直方向
+    side = np.array([-forward[1], forward[0]])
+
+    half_l = length / 2.0
+    half_w = width / 2.0
+
+    # 四个角点
+    corners = np.array([
+        center + half_l * forward + half_w * side,   # 前右
+        center + half_l * forward - half_w * side,   # 前左
+        center - half_l * forward - half_w * side,   # 后左
+        center - half_l * forward + half_w * side,   # 后右
+    ])
+
+    return corners
+
+
 def merge_overlapping_outlines(outlines: List[np.ndarray]) -> Optional[np.ndarray]:
     """
     合并重叠的轮廓
@@ -1019,7 +1063,11 @@ def generate_fpc_layout(
     flatten_result: PathFlattenResult,
     groove_width: float = 1.0,
     pad_radius: float = 2.0,
-    center_pad_radius: float = 3.0
+    center_pad_radius: float = 3.0,
+    rectangular_pad_enabled: bool = False,
+    rectangular_pad_length: float = 3.0,
+    rectangular_pad_width: float = 2.0,
+    point_pad_sizes: Optional[Dict[str, Tuple[float, float]]] = None
 ) -> FPCLayoutResult:
     """
     根据展开结果生成FPC布局图
@@ -1027,14 +1075,19 @@ def generate_fpc_layout(
     Args:
         flatten_result: 路径展开结果
         groove_width: 凹槽（走线）宽度
-        pad_radius: IR点焊盘半径
-        center_pad_radius: 中心焊盘半径
+        pad_radius: IR点焊盘半径（圆形焊盘时使用）
+        center_pad_radius: 中心焊盘半径（圆形焊盘时使用）
+        rectangular_pad_enabled: 是否使用方形焊盘
+        rectangular_pad_length: 方形焊盘长度（默认值）
+        rectangular_pad_width: 方形焊盘宽度（默认值）
+        point_pad_sizes: 每个点的单独焊盘尺寸 {point_id: (length, width)}
 
     Returns:
         FPC布局结果
     """
     groove_outlines = {}
     ir_pads = {}
+    rectangular_pads = {}
     all_outline_points = []
 
     # 为每条路径生成凹槽轮廓
@@ -1049,12 +1102,69 @@ def generate_fpc_layout(
     for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
         if is_center:
             continue  # 中心点单独处理
-        pad = create_circular_pad(pos, pad_radius)
-        ir_pads[point_id] = pad
-        all_outline_points.extend(pad.tolist())
+
+        if rectangular_pad_enabled:
+            # 获取该点的焊盘尺寸
+            if point_pad_sizes and point_id in point_pad_sizes:
+                pad_l, pad_w = point_pad_sizes[point_id]
+            else:
+                pad_l, pad_w = rectangular_pad_length, rectangular_pad_width
+
+            # 计算路径方向（从IR点到中心点）
+            path_2d = flatten_result.paths_2d.get(point_id)
+            if path_2d is not None and len(path_2d) >= 2:
+                # 路径方向：从第一个点（IR点）到第二个点
+                direction = path_2d[1] - path_2d[0]
+            else:
+                # 默认方向：指向中心点
+                direction = flatten_result.center_2d - pos
+
+            # 生成带方向的方形焊盘
+            rect_pad = create_oriented_rectangular_pad(
+                pos, pad_l, pad_w, direction
+            )
+            rectangular_pads[point_id] = rect_pad
+            all_outline_points.extend(rect_pad.tolist())
+
+            # 同时也存储到 ir_pads（用于兼容性）
+            ir_pads[point_id] = rect_pad
+        else:
+            # 使用圆形焊盘
+            pad = create_circular_pad(pos, pad_radius)
+            ir_pads[point_id] = pad
+            all_outline_points.extend(pad.tolist())
 
     # 生成中心焊盘
-    center_pad = create_circular_pad(flatten_result.center_2d, center_pad_radius)
+    if rectangular_pad_enabled:
+        # 中心点也使用方形焊盘
+        # 获取中心点的焊盘尺寸
+        center_point_id = None
+        for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
+            if is_center:
+                center_point_id = point_id
+                break
+
+        if point_pad_sizes and center_point_id and center_point_id in point_pad_sizes:
+            center_pad_l, center_pad_w = point_pad_sizes[center_point_id]
+        else:
+            # 默认中心点焊盘尺寸（稍大一些）
+            center_pad_l = rectangular_pad_length * 1.5
+            center_pad_w = rectangular_pad_width * 1.5
+
+        # 中心点的方向：使用第一条路径的方向作为参考，或默认向右
+        center_direction = np.array([1.0, 0.0])
+        if flatten_result.paths_2d:
+            first_path = list(flatten_result.paths_2d.values())[0]
+            if len(first_path) >= 2:
+                # 方向从中心点向外
+                center_direction = first_path[-2] - first_path[-1]
+
+        center_pad = create_oriented_rectangular_pad(
+            flatten_result.center_2d, center_pad_l, center_pad_w, center_direction
+        )
+    else:
+        center_pad = create_circular_pad(flatten_result.center_2d, center_pad_radius)
+
     all_outline_points.extend(center_pad.tolist())
 
     # 合并所有轮廓
@@ -1075,5 +1185,6 @@ def generate_fpc_layout(
         merged_outline=merged_outline,
         center_pad=center_pad,
         ir_pads=ir_pads,
+        rectangular_pads=rectangular_pads,
         total_bounds=(min_bounds, max_bounds)
     )
