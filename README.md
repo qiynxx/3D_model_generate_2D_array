@@ -4,11 +4,16 @@
 
 ## 功能特性
 
-- **3D模型加载**：支持 STL、3MF、OBJ、PLY 格式
+- **3D模型加载**：支持 STL、3MF、OBJ、PLY、OFF 格式（通过 trimesh 自动修复）
 - **交互式点选**：在模型表面点击添加IR点位
-- **测地线路径**：自动计算曲面上的最短路径连接
-- **凹槽生成**：沿路径生成可调参数的FPC走线凹槽
-- **曲面展开**：LSCM共形映射算法，保持角度精度
+- **测地线路径**：基于 Dijkstra 算法计算曲面上的最短路径连接
+- **凹槽生成**：
+  - 沿路径生成可调参数的FPC走线凹槽
+  - 支持方形焊盘凹槽（IR点位置）
+  - 曲面贴合凹槽，顶部与曲面完美贴合
+  - 支持多沟槽交叉（使用布尔并集正确合并）
+- **曲面展开**：LSCM（最小二乘共形映射）算法，保持角度精度
+- **FPC图纸生成**：自动生成2D FPC布局图纸
 - **多格式导出**：DXF、SVG、STL、项目配置JSON
 
 ## 安装
@@ -16,14 +21,13 @@
 ### 依赖安装
 
 ```bash
-cd ir_array_tool
 pip install -r requirements.txt
 ```
 
 或手动安装：
 
 ```bash
-pip install pyqt5 pyvista pyvistaqt trimesh numpy scipy ezdxf numpy-stl networkx
+pip install pyqt5 pyvista pyvistaqt trimesh numpy scipy ezdxf numpy-stl networkx manifold3d potpourri3d
 ```
 
 ### 运行
@@ -74,18 +78,20 @@ python main.py
 - 系统自动计算所有IR点到中心点的测地线最短路径
 - 路径显示为橙色线条
 
-### 5. 生成凹槽（可选）
+### 5. 生成凹槽
 
 1. 切换到右下方的 **"凹槽"** 选项卡
 2. 调整参数：
    - **基础宽度**：凹槽宽度 (mm)
    - **凹槽深度**：凹槽深度 (mm)
    - **自动调整宽度**：根据汇聚线路数量自动加宽
+   - **方形焊盘**：在IR点位置生成方形焊盘凹槽
+   - **焊盘尺寸**：方形焊盘的长度和宽度
 3. 点击 **"生成凹槽预览"**
 4. 凹槽显示为紫色半透明
-5. 系统会尝试将凹槽应用到3D模型（需要Blender或Manifold引擎）
+5. 系统会尝试将凹槽应用到3D模型（需要 manifold3d 或 Blender 引擎）
 
-> **提示**：凹槽会被应用到导出的3D模型中。如果布尔运算不可用，凹槽几何体将单独保存。
+> **提示**：多条沟槽交叉时会自动使用布尔并集合并，确保交叉部分正确切割。
 
 ### 6. 曲面展开
 
@@ -94,7 +100,17 @@ python main.py
 3. 系统使用LSCM算法将曲面展开为2D
 4. 显示变形量信息
 
-### 7. 导出文件
+### 7. 生成FPC图纸
+
+1. 在生成凹槽和展开曲面后
+2. 点击 **"生成FPC图纸"** 按钮
+3. 系统自动生成2D FPC布局，包含：
+   - 凹槽轮廓
+   - IR点焊盘（方形或圆形）
+   - 中心点焊盘
+   - 合并后的外轮廓
+
+### 8. 导出文件
 
 1. 切换到 **"导出"** 选项卡
 2. 点击 **"浏览..."** 选择输出目录
@@ -133,16 +149,21 @@ ir_array_tool/
 ├── requirements.txt        # 依赖列表
 ├── run.sh                  # 启动脚本
 ├── README.md               # 本文件
+├── CLAUDE.md               # Claude Code 开发指南
 ├── ui/
 │   ├── main_window.py      # 主窗口
 │   ├── viewer_3d.py        # 3D视图组件 (PyVista)
+│   ├── view_2d.py          # 2D展开视图
 │   ├── point_panel.py      # 点位管理面板
-│   └── param_panel.py      # 参数设置面板
+│   ├── param_panel.py      # 参数设置面板
+│   └── coord_panel.py      # 坐标显示面板
 ├── core/
 │   ├── mesh_loader.py      # 模型加载 (trimesh)
 │   ├── geodesic.py         # 测地线路径计算 (Dijkstra)
-│   ├── groove_gen.py       # 凹槽生成
+│   ├── groove_gen.py       # 凹槽生成（支持方形焊盘）
 │   ├── conformal_map.py    # LSCM共形映射展开
+│   ├── path_planner_2d.py  # 2D路径规划
+│   ├── path_flatten.py     # 路径展平
 │   └── exporter.py         # 文件导出 (DXF/SVG/STL)
 └── utils/
     └── geometry.py         # 几何工具函数
@@ -157,7 +178,16 @@ ir_array_tool/
 使用LSCM（最小二乘共形映射）算法，保持局部角度不变，适合FPC柔性电路板的平面化制造。
 
 ### 凹槽生成
-沿测地线路径生成矩形截面的凹槽几何体，支持自适应宽度（根据汇聚线路数量自动加宽）。
+- 沿测地线路径生成矩形截面的凹槽几何体
+- 支持曲面贴合（凹槽顶部与曲面完美贴合）
+- 支持自适应宽度（根据汇聚线路数量自动加宽）
+- 支持方形焊盘凹槽（在IR点位置）
+- 多沟槽交叉时使用布尔并集(union)合并，确保交叉部分正确切割
+
+### 布尔运算引擎
+支持两种布尔运算引擎：
+- **manifold3d**（推荐）：高性能几何内核，`pip install manifold3d`
+- **Blender**：需要安装 Blender 并确保可从命令行调用
 
 ## 常见问题
 
@@ -173,6 +203,15 @@ A: 检查模型文件是否损坏，尝试使用其他软件（如 MeshLab）打
 
 ### Q: 路径生成失败？
 A: 确保已设置中心连接点（双击列表中的点），且至少有2个IR点。
+
+### Q: 凹槽交叉部分没有正确切割？
+A: 确保已安装 manifold3d (`pip install manifold3d`) 或 Blender。程序会自动使用布尔并集合并所有凹槽后再执行差集运算。
+
+### Q: 布尔运算失败？
+A:
+1. 安装 manifold3d：`pip install manifold3d`
+2. 或安装 Blender 并确保可从命令行调用
+3. 凹槽预览会正常显示，但无法应用到导出的3D模型
 
 ## 许可证
 

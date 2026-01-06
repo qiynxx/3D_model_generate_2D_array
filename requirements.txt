@@ -1,11 +1,30 @@
+# GUI框架
 pyqt5>=5.15
+
+# 3D可视化
 pyvista>=0.43
 pyvistaqt>=0.11
+vtk>=9.0
+
+# 网格处理
 trimesh>=4.0
+numpy-stl>=3.0
+
+# 数值计算
 numpy>=1.24
 scipy>=1.11
-potpourri3d>=0.0.8
-ezdxf>=1.1
-numpy-stl>=3.0
+
+# 图论算法
 networkx>=3.0
-manifold3d>=3.3.2
+
+# 测地线计算
+potpourri3d>=0.0.8
+
+# 布尔运算引擎
+manifold3d>=3.0
+
+# 文件导出
+ezdxf>=1.1
+
+# 可视化（用于调试）
+matplotlib>=3.7
