@@ -35,7 +35,7 @@ class ExportParams:
 @dataclass
 class FPCParams:
     """FPC布局参数"""
-    groove_width: float = 1.0  # 凹槽宽度（用于2D展开）
+    groove_width: float = 1.0  # 走线宽度（与凹槽宽度同步）
     pad_radius: float = 2.0  # IR点焊盘半径
     center_pad_radius: float = 3.0  # 中心焊盘半径
 
@@ -160,13 +160,13 @@ class ParamPanel(QWidget):
         self.depth_label = QLabel("凹槽深度: 0.5 mm")
         depth_layout.addWidget(self.depth_label)
         self.depth_slider = QSlider(Qt.Horizontal)
-        self.depth_slider.setRange(1, 50)  # 0.1 - 5.0 mm
+        self.depth_slider.setRange(1, 200)  # 0.1 - 20.0 mm
         self.depth_slider.setValue(5)
         self.depth_slider.valueChanged.connect(self._on_depth_slider_changed)
         depth_layout.addWidget(self.depth_slider)
         # 保留隐藏的spin
         self.depth_spin = QDoubleSpinBox()
-        self.depth_spin.setRange(0.1, 5.0)
+        self.depth_spin.setRange(0.1, 20.0)
         self.depth_spin.setValue(0.5)
         self.depth_spin.setVisible(False)
 
@@ -207,24 +207,24 @@ class ParamPanel(QWidget):
         self.pad_length_label = QLabel("长度: 3.0 mm")
         pad_layout.addWidget(self.pad_length_label)
         self.pad_length_slider = QSlider(Qt.Horizontal)
-        self.pad_length_slider.setRange(10, 200)  # 1.0 - 20.0 mm
+        self.pad_length_slider.setRange(10, 500)  # 1.0 - 50.0 mm
         self.pad_length_slider.setValue(30)
         self.pad_length_slider.valueChanged.connect(self._on_pad_length_slider_changed)
         pad_layout.addWidget(self.pad_length_slider)
         self.pad_length_spin = QDoubleSpinBox()
-        self.pad_length_spin.setRange(1.0, 20.0)
+        self.pad_length_spin.setRange(1.0, 50.0)
         self.pad_length_spin.setValue(3.0)
         self.pad_length_spin.setVisible(False)
 
         self.pad_width_label = QLabel("宽度: 2.0 mm")
         pad_layout.addWidget(self.pad_width_label)
         self.pad_width_slider = QSlider(Qt.Horizontal)
-        self.pad_width_slider.setRange(10, 200)  # 1.0 - 20.0 mm
+        self.pad_width_slider.setRange(10, 500)  # 1.0 - 50.0 mm
         self.pad_width_slider.setValue(20)
         self.pad_width_slider.valueChanged.connect(self._on_pad_width_slider_changed)
         pad_layout.addWidget(self.pad_width_slider)
         self.pad_width_spin = QDoubleSpinBox()
-        self.pad_width_spin.setRange(1.0, 20.0)
+        self.pad_width_spin.setRange(1.0, 50.0)
         self.pad_width_spin.setValue(2.0)
         self.pad_width_spin.setVisible(False)
 
@@ -294,13 +294,6 @@ class ParamPanel(QWidget):
         scale = value / 10.0
         self.scale_spin.setValue(scale)
         self.scale_label.setText(f"输出比例: {scale:.1f} : 1")
-
-    def _on_fpc_width_slider_changed(self, value):
-        """FPC走线宽度滑块变更"""
-        width = value / 10.0
-        self.fpc_width_spin.setValue(width)
-        self.fpc_width_label.setText(f"走线宽度: {width:.1f} mm")
-        self._on_fpc_params_changed()
 
     def _on_pad_radius_slider_changed(self, value):
         """IR焊盘半径滑块变更"""
@@ -380,19 +373,10 @@ class ParamPanel(QWidget):
         fpc_layout = QVBoxLayout(fpc_group)
         fpc_layout.setSpacing(4)
 
-        # 走线宽度 - 滑块
-        self.fpc_width_label = QLabel("走线宽度: 1.0 mm")
-        fpc_layout.addWidget(self.fpc_width_label)
-        self.fpc_width_slider = QSlider(Qt.Horizontal)
-        self.fpc_width_slider.setRange(1, 100)  # 0.1 - 10.0 mm
-        self.fpc_width_slider.setValue(10)
-        self.fpc_width_slider.valueChanged.connect(self._on_fpc_width_slider_changed)
-        fpc_layout.addWidget(self.fpc_width_slider)
-        # 隐藏的spin
-        self.fpc_width_spin = QDoubleSpinBox()
-        self.fpc_width_spin.setRange(0.1, 10.0)
-        self.fpc_width_spin.setValue(1.0)
-        self.fpc_width_spin.setVisible(False)
+        # 走线宽度说明 - 使用凹槽宽度
+        fpc_width_info = QLabel("走线宽度: 使用凹槽宽度设置")
+        fpc_width_info.setStyleSheet("color: #888; font-style: italic;")
+        fpc_layout.addWidget(fpc_width_info)
 
         # IR焊盘半径 - 滑块
         self.pad_radius_label = QLabel("IR焊盘半径: 2.0 mm")
@@ -726,7 +710,8 @@ class ParamPanel(QWidget):
 
     def _on_fpc_params_changed(self):
         """FPC参数变更"""
-        self.fpc_params.groove_width = self.fpc_width_spin.value()
+        # 走线宽度使用凹槽宽度设置（保持同步）
+        self.fpc_params.groove_width = self.width_spin.value()
         self.fpc_params.pad_radius = self.pad_radius_spin.value()
         self.fpc_params.center_pad_radius = self.center_pad_spin.value()
 
@@ -779,6 +764,17 @@ class ParamPanel(QWidget):
 
     def get_groove_params(self) -> GrooveParams:
         """获取凹槽参数"""
+        # 手动同步所有参数值（避免信号循环）
+        self.groove_params.width = self.width_spin.value()
+        self.groove_params.depth = self.depth_spin.value()
+        self.groove_params.auto_width = self.auto_width_check.isChecked()
+        self.groove_params.min_width = self.min_width_spin.value()
+        self.groove_params.max_width = self.max_width_spin.value()
+        self.groove_params.conform_to_surface = self.conform_surface_check.isChecked()
+        self.groove_params.extension_height = self.ext_height_spin.value()
+        self.groove_params.pad_enabled = self.pad_enabled_check.isChecked()
+        self.groove_params.pad_length = self.pad_length_spin.value()
+        self.groove_params.pad_width = self.pad_width_spin.value()
         return self.groove_params
 
     def get_export_params(self) -> ExportParams:

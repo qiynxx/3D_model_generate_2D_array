@@ -567,12 +567,17 @@ class GrooveGenerator:
         d = depth if depth is not None else self.params.depth
         ext_h = self.params.extension_height
 
-        # 归一化法向量
-        normal = normal / (np.linalg.norm(normal) + 1e-10)
+        # 首先将中心点投影到曲面，获取精确的曲面位置和法向量
+        projected, proj_normals = self._project_points_to_surface(center_point.reshape(1, 3))
+        center_on_surface = projected[0]
+        surface_normal = proj_normals[0]
+
+        # 使用曲面投影得到的法向量，而不是传入的法向量（更精确）
+        normal = surface_normal / (np.linalg.norm(surface_normal) + 1e-10)
 
         # 确保法向量指向外部
         mesh_center = self.mesh.centroid
-        to_center = mesh_center - center_point
+        to_center = mesh_center - center_on_surface
         if np.dot(normal, to_center) > 0:
             normal = -normal
 
@@ -602,11 +607,6 @@ class GrooveGenerator:
         # side向量垂直于forward和normal
         side = np.cross(normal, forward)
         side = side / (np.linalg.norm(side) + 1e-10)
-
-        # 将中心点投影到曲面
-        projected, proj_normals = self._project_points_to_surface(center_point.reshape(1, 3))
-        center_on_surface = projected[0]
-        surface_normal = proj_normals[0]
 
         # 计算方形的四个角点（在曲面上）
         half_l = pl / 2.0

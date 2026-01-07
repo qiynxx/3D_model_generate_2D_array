@@ -225,6 +225,7 @@ class MainWindow(QMainWindow):
         self.coord_panel.show_axes_changed.connect(self._on_show_axes_changed)
 
         # 参数面板
+        self.param_panel.groove_params_changed.connect(self._on_groove_params_changed)
         self.param_panel.generate_grooves_clicked.connect(self._on_generate_grooves)
         self.param_panel.flatten_clicked.connect(self._on_flatten)
         self.param_panel.generate_fpc_layout_clicked.connect(self._on_generate_fpc_layout)
@@ -358,6 +359,17 @@ class MainWindow(QMainWindow):
             self.path_manager.ir_points[point_id].pad_width = width
             self.status_bar.showMessage(f"点 {point_id[:8]} 焊盘尺寸: {length}x{width}mm")
 
+    def _on_groove_params_changed(self, params):
+        """全局凹槽参数变更 - 同步更新所有点的焊盘尺寸"""
+        if self.path_manager is None:
+            return
+
+        # 当全局焊盘尺寸改变时，同步更新所有IR点的焊盘尺寸
+        # 这样凹槽生成和FPC图纸生成都会使用相同的参数
+        for point_id, ir_point in self.path_manager.ir_points.items():
+            ir_point.pad_length = params.pad_length
+            ir_point.pad_width = params.pad_width
+
     def _on_path_mode_changed(self, mode: str):
         """路径模式变更"""
         self.path_mode = mode
@@ -473,10 +485,14 @@ class MainWindow(QMainWindow):
         path_mode = self.point_panel.get_path_mode()
         is_serial_mode = path_mode == PathMode.SERIAL.value
 
+        print(f"\n=== 凹槽生成调试 ===")
         print(f"路径模式: {'串联' if is_serial_mode else '星形'}")
         print(f"凹槽参数: 宽度={params.width}, 深度={params.depth}, 曲面贴合={params.conform_to_surface}")
         print(f"方形焊盘: 启用={params.pad_enabled}, 长={params.pad_length}, 宽={params.pad_width}")
         print(f"向外延伸: {params.extension_height}mm")
+        print(f"IR点数量: {len(self.path_manager.ir_points)}")
+        print(f"smooth_paths数量: {len(self.path_manager.smooth_paths)}")
+        print(f"smooth_paths keys: {list(self.path_manager.smooth_paths.keys())}")
 
         self.groove_generator.set_params(
             width=params.width,
@@ -499,6 +515,9 @@ class MainWindow(QMainWindow):
         groove_count = 0
         pad_count = 0
 
+        # 标记是否使用了备用路径（没有有效段时）
+        using_fallback_path = False
+
         if is_serial_mode:
             # 串联模式：使用分段后的串联路径（排除已删除的段）+ 自定义路径
             segments = self.path_manager.get_serial_segments()
@@ -508,6 +527,7 @@ class MainWindow(QMainWindow):
                 serial_path = self.path_manager.get_smooth_path("serial")
                 if serial_path is not None and len(serial_path) >= 2:
                     segments = [("start", "end", serial_path)]
+                    using_fallback_path = True  # 标记使用了备用路径
 
             if not segments:
                 print(f"警告: 串联路径不可用")
@@ -568,7 +588,12 @@ class MainWindow(QMainWindow):
                     full_serial_path = None
 
                 # 获取连通的点（排除被删除段导致的孤立点）
-                connected_points = self.path_manager.get_connected_points_in_serial()
+                # 如果使用了备用路径，则所有IR点都视为连通的
+                if using_fallback_path:
+                    connected_points = set(self.path_manager.ir_points.keys())
+                    print(f"使用备用路径，所有 {len(connected_points)} 个点视为连通")
+                else:
+                    connected_points = self.path_manager.get_connected_points_in_serial()
                 print(f"连通的点: {len(connected_points)} 个")
 
                 for point_id, ir_point in self.path_manager.ir_points.items():
@@ -762,6 +787,8 @@ class MainWindow(QMainWindow):
                         self.mesh_with_grooves = self.mesh.difference(combined_groove, engine=engine)
                         print(f"凹槽已应用到模型 ({engine}引擎)")
                         boolean_success = True
+                        # 更新3D视图显示带凹槽的模型
+                        self.viewer_3d.update_mesh_with_grooves(self.mesh_with_grooves)
                     except Exception as e:
                         print(f"{engine}引擎差集失败: {e}")
 
@@ -935,12 +962,17 @@ class MainWindow(QMainWindow):
             # 获取凹槽参数（用于方形焊盘）
             groove_params = self.param_panel.get_groove_params()
 
+            print(f"\n=== FPC图纸生成调试 ===")
+            print(f"fpc_params: groove_width={fpc_params.groove_width}, pad_radius={fpc_params.pad_radius}")
+            print(f"groove_params: pad_enabled={groove_params.pad_enabled}, pad_length={groove_params.pad_length}, pad_width={groove_params.pad_width}")
+
             # 获取每个点的焊盘尺寸
             point_pad_sizes = None
             if self.path_manager:
                 point_pad_sizes = {}
                 for point_id, point in self.path_manager.ir_points.items():
                     point_pad_sizes[point_id] = (point.pad_length, point.pad_width)
+                print(f"point_pad_sizes: {len(point_pad_sizes)} 个点")
 
             # 生成FPC布局
             self.fpc_layout_result = generate_fpc_layout(
