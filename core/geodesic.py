@@ -344,6 +344,7 @@ class PathManager:
         self.smoothness: float = 0.5  # 平滑度参数
         self._point_counter: int = 0  # 点序号计数器
         self.serial_order: List[str] = []  # 串联模式的点顺序（用户指定）
+        self.excluded_serial_segments: set = set()  # 被删除的串联路径段 {(from_id, to_id), ...}
 
     def set_serial_order(self, order: List[str]):
         """设置串联顺序"""
@@ -768,3 +769,389 @@ class PathManager:
 
         self.center_point_id = data.get('center_point_id')
         self.serial_order = data.get('serial_order', [])
+
+    # ==================== 手动路径编辑功能 ====================
+
+    def add_custom_path(self, from_point_id: str, to_point_id: str) -> Optional[str]:
+        """
+        在两个点之间添加自定义路径
+
+        Args:
+            from_point_id: 起点ID
+            to_point_id: 终点ID
+
+        Returns:
+            路径key，失败返回None
+        """
+        if from_point_id not in self.ir_points or to_point_id not in self.ir_points:
+            print(f"错误: 点不存在 ({from_point_id}, {to_point_id})")
+            return None
+
+        if from_point_id == to_point_id:
+            print("错误: 起点和终点不能相同")
+            return None
+
+        from_point = self.ir_points[from_point_id]
+        to_point = self.ir_points[to_point_id]
+
+        # 生成路径key
+        path_key = f"{from_point_id}_to_{to_point_id}"
+
+        print(f"\n添加自定义路径: {from_point.name} -> {to_point.name}")
+
+        # 使用测地线算法计算路径
+        try:
+            path_3d = compute_geodesic_dijkstra(
+                self.mesh,
+                from_point.position,
+                to_point.position,
+                num_samples=60,
+                smooth_path=False,
+                turn_penalty=2.0,
+                normal_penalty=5.0
+            )
+
+            if len(path_3d) == 0:
+                # 回退到直接投影法
+                path_3d = create_smooth_direct_path(
+                    from_point.position,
+                    to_point.position,
+                    self.mesh,
+                    num_points=50
+                )
+
+            if len(path_3d) > 0:
+                self.paths[path_key] = ([], path_3d)
+                self.smooth_paths[path_key] = path_3d
+
+                # 更新连接关系
+                if to_point_id not in from_point.connections:
+                    from_point.connections.append(to_point_id)
+
+                path_length = np.sum(np.linalg.norm(np.diff(path_3d, axis=0), axis=1))
+                print(f"路径添加成功: {len(path_3d)} 点, 长度 {path_length:.2f}")
+                return path_key
+            else:
+                print("错误: 无法计算路径")
+                return None
+
+        except Exception as e:
+            print(f"错误: 路径计算失败 - {e}")
+            return None
+
+    def remove_path(self, path_key: str) -> bool:
+        """
+        删除指定路径
+
+        Args:
+            path_key: 路径key
+
+        Returns:
+            是否删除成功
+        """
+        print(f"[remove_path] 尝试删除路径: {path_key}")
+        print(f"[remove_path] paths keys: {list(self.paths.keys())}")
+        print(f"[remove_path] smooth_paths keys: {list(self.smooth_paths.keys())}")
+
+        if path_key not in self.paths and path_key not in self.smooth_paths:
+            print(f"[remove_path] 路径不存在: {path_key}")
+            return False
+
+        # 解析路径key获取起点和终点ID
+        if "_to_" in path_key:
+            # 自定义路径格式：from_id_to_to_id
+            parts = path_key.split("_to_")
+            from_id = parts[0]
+            to_id = parts[1] if len(parts) > 1 else None
+
+            # 清除连接关系
+            if from_id in self.ir_points and to_id:
+                from_point = self.ir_points[from_id]
+                if to_id in from_point.connections:
+                    from_point.connections.remove(to_id)
+                    print(f"[remove_path] 清除连接: {from_id} -> {to_id}")
+        else:
+            # 星形模式：key是非中心点ID，终点是center_point_id
+            from_id = path_key
+            to_id = self.center_point_id
+
+            # 清除连接关系
+            if from_id in self.ir_points and to_id:
+                from_point = self.ir_points[from_id]
+                if to_id in from_point.connections:
+                    from_point.connections.remove(to_id)
+                    print(f"[remove_path] 清除星形连接: {from_id} -> {to_id}")
+
+        # 删除路径数据
+        self.paths.pop(path_key, None)
+        self.smooth_paths.pop(path_key, None)
+
+        print(f"[remove_path] 路径已删除: {path_key}")
+        return True
+
+    def get_path_list(self) -> List[dict]:
+        """
+        获取当前所有路径列表
+
+        Returns:
+            路径信息列表 [{'key': str, 'from_name': str, 'to_name': str, 'length': float}, ...]
+        """
+        path_list = []
+
+        for path_key in self.smooth_paths.keys():
+            path_info = {'key': path_key}
+
+            # 解析路径名称
+            if path_key == "serial":
+                path_info['from_name'] = "串联起点"
+                path_info['to_name'] = "串联终点"
+                path_info['display_name'] = "串联路径"
+            elif "_to_" in path_key:
+                # 自定义路径格式：from_id_to_to_id
+                parts = path_key.split("_to_")
+                from_id = parts[0]
+                to_id = parts[1] if len(parts) > 1 else None
+
+                from_point = self.ir_points.get(from_id)
+                to_point = self.ir_points.get(to_id) if to_id else None
+
+                path_info['from_name'] = from_point.name if from_point else from_id[:8]
+                path_info['to_name'] = to_point.name if to_point else (to_id[:8] if to_id else "?")
+                path_info['from_id'] = from_id
+                path_info['to_id'] = to_id
+                path_info['display_name'] = f"{path_info['from_name']} → {path_info['to_name']}"
+            else:
+                # 星形模式：key是IR点ID，终点是中心点
+                from_point = self.ir_points.get(path_key)
+                center_point = self.ir_points.get(self.center_point_id)
+
+                path_info['from_name'] = from_point.name if from_point else path_key[:8]
+                path_info['to_name'] = center_point.name if center_point else "中心点"
+                path_info['from_id'] = path_key
+                path_info['to_id'] = self.center_point_id
+                path_info['display_name'] = f"{path_info['from_name']} → {path_info['to_name']}"
+
+            # 计算路径长度
+            path_data = self.smooth_paths.get(path_key)
+            if path_data is not None and len(path_data) > 1:
+                path_info['length'] = np.sum(np.linalg.norm(np.diff(path_data, axis=0), axis=1))
+            else:
+                path_info['length'] = 0
+
+            path_list.append(path_info)
+
+        return path_list
+
+    def has_path_between(self, point_id_1: str, point_id_2: str) -> bool:
+        """
+        检查两点之间是否已存在路径
+
+        Args:
+            point_id_1: 点1 ID
+            point_id_2: 点2 ID
+
+        Returns:
+            是否存在路径
+        """
+        return self.find_path_key_between(point_id_1, point_id_2) is not None
+
+    def find_path_key_between(self, point_id_1: str, point_id_2: str) -> Optional[str]:
+        """
+        查找两点之间路径的key
+
+        Args:
+            point_id_1: 点1 ID
+            point_id_2: 点2 ID
+
+        Returns:
+            路径key，不存在返回None
+        """
+        print(f"[find_path_key_between] 查找: {point_id_1[:8] if point_id_1 else 'None'} <-> {point_id_2[:8] if point_id_2 else 'None'}")
+        print(f"[find_path_key_between] smooth_paths keys: {list(self.smooth_paths.keys())}")
+        print(f"[find_path_key_between] center_point_id: {self.center_point_id}")
+
+        # 1. 检查自定义路径格式（双向）- 最优先
+        key1 = f"{point_id_1}_to_{point_id_2}"
+        key2 = f"{point_id_2}_to_{point_id_1}"
+
+        if key1 in self.smooth_paths:
+            print(f"[find_path_key_between] 找到自定义路径: {key1}")
+            return key1
+        if key2 in self.smooth_paths:
+            print(f"[find_path_key_between] 找到自定义路径: {key2}")
+            return key2
+
+        # 2. 检查星形模式（key是非中心点ID，路径是从该点到中心点）
+        if self.center_point_id:
+            # 如果其中一个点是中心点，另一个点的ID可能就是路径key
+            if point_id_1 == self.center_point_id:
+                # point_id_2 是非中心点，检查其ID是否是路径key
+                if point_id_2 in self.smooth_paths:
+                    # 确认这是星形路径（key不含"_to_"且不是"serial"）
+                    if "_to_" not in point_id_2 and point_id_2 != "serial":
+                        print(f"[find_path_key_between] 找到星形路径: {point_id_2}")
+                        return point_id_2
+            elif point_id_2 == self.center_point_id:
+                # point_id_1 是非中心点
+                if point_id_1 in self.smooth_paths:
+                    if "_to_" not in point_id_1 and point_id_1 != "serial":
+                        print(f"[find_path_key_between] 找到星形路径: {point_id_1}")
+                        return point_id_1
+
+        # 3. 如果没有设置中心点，但路径key本身就是点ID（星形模式的遗留路径）
+        # 遍历所有路径，检查是否有以任一点ID为key的星形路径
+        for path_key in self.smooth_paths.keys():
+            if path_key == "serial":
+                continue
+            if "_to_" in path_key:
+                continue
+            # 这是一个星形路径（key是非中心点ID）
+            if path_key == point_id_1 or path_key == point_id_2:
+                # 检查这个路径是否连接到另一个点
+                # 星形路径的终点是center_point_id
+                if self.center_point_id:
+                    if (path_key == point_id_1 and point_id_2 == self.center_point_id) or \
+                       (path_key == point_id_2 and point_id_1 == self.center_point_id):
+                        print(f"[find_path_key_between] 找到星形路径(遍历): {path_key}")
+                        return path_key
+
+        # 4. 【新增】检查串联模式 - 查找两点是否在串联路径中相邻
+        # 注意：串联路径本身不能被删除，但可以识别出来用于提示
+        if "serial" in self.smooth_paths:
+            serial_order = self.get_serial_order()
+            if serial_order and len(serial_order) >= 2:
+                # 检查两点是否在串联顺序中相邻
+                try:
+                    idx1 = serial_order.index(point_id_1)
+                    idx2 = serial_order.index(point_id_2)
+                    if abs(idx1 - idx2) == 1:
+                        # 两点相邻，返回特殊标记（不可删除）
+                        print(f"[find_path_key_between] 两点在串联路径中相邻: serial_segment")
+                        return "serial_segment"
+                except ValueError:
+                    pass  # 点不在串联顺序中
+
+        print(f"[find_path_key_between] 未找到路径")
+        return None
+
+    def is_serial_segment(self, path_key: str) -> bool:
+        """检查路径key是否是串联路径的一段"""
+        return path_key == "serial_segment" or path_key == "serial"
+
+    def remove_serial_segment(self, from_id: str, to_id: str) -> bool:
+        """
+        删除串联路径中的一段
+
+        Args:
+            from_id: 起点ID
+            to_id: 终点ID
+
+        Returns:
+            是否成功删除
+        """
+        # 确保两点确实是串联路径中相邻的点
+        serial_order = self.get_serial_order()
+        if not serial_order or len(serial_order) < 2:
+            print(f"[remove_serial_segment] 串联顺序无效")
+            return False
+
+        try:
+            idx1 = serial_order.index(from_id)
+            idx2 = serial_order.index(to_id)
+            if abs(idx1 - idx2) != 1:
+                print(f"[remove_serial_segment] 两点不相邻: {from_id}, {to_id}")
+                return False
+        except ValueError:
+            print(f"[remove_serial_segment] 点不在串联顺序中")
+            return False
+
+        # 添加到排除集合（使用排序后的元组确保一致性）
+        segment = tuple(sorted([from_id, to_id]))
+        self.excluded_serial_segments.add(segment)
+        print(f"[remove_serial_segment] 已删除串联段: {segment}")
+        return True
+
+    def is_serial_segment_excluded(self, from_id: str, to_id: str) -> bool:
+        """检查串联段是否已被删除"""
+        segment = tuple(sorted([from_id, to_id]))
+        return segment in self.excluded_serial_segments
+
+    def clear_excluded_serial_segments(self):
+        """清除所有被排除的串联段"""
+        self.excluded_serial_segments.clear()
+
+    def get_serial_segments(self) -> list:
+        """
+        获取所有有效的串联路径段（排除已删除的）
+
+        Returns:
+            [(from_id, to_id, segment_path), ...] 每个段包含起点ID、终点ID和路径点数组
+        """
+        if "serial" not in self.smooth_paths:
+            return []
+
+        serial_order = self.get_serial_order()
+        if not serial_order or len(serial_order) < 2:
+            return []
+
+        full_path = self.smooth_paths["serial"]
+        segments = []
+
+        # 计算每个点在完整路径中的大致位置
+        # 由于路径是连续的，需要找到每个IR点对应的路径点索引
+        point_indices = {}
+        for point_id in serial_order:
+            if point_id not in self.ir_points:
+                continue
+            point_pos = self.ir_points[point_id].position
+            # 找到路径上最接近该点的索引
+            distances = np.linalg.norm(full_path - point_pos, axis=1)
+            point_indices[point_id] = np.argmin(distances)
+
+        # 按路径索引排序点
+        sorted_points = sorted(point_indices.items(), key=lambda x: x[1])
+
+        # 分割路径为段
+        for i in range(len(sorted_points) - 1):
+            from_id = sorted_points[i][0]
+            to_id = sorted_points[i + 1][0]
+            from_idx = sorted_points[i][1]
+            to_idx = sorted_points[i + 1][1]
+
+            # 检查是否被排除
+            if self.is_serial_segment_excluded(from_id, to_id):
+                print(f"[get_serial_segments] 跳过已删除的段: {from_id} -> {to_id}")
+                continue
+
+            # 提取该段的路径点
+            segment_path = full_path[from_idx:to_idx + 1]
+            segments.append((from_id, to_id, segment_path))
+
+        return segments
+
+    def get_connected_points_in_serial(self) -> set:
+        """
+        获取在有效路径中连通的点ID集合（包括串联段和自定义路径）
+
+        Returns:
+            连通的点ID集合
+        """
+        connected = set()
+
+        # 1. 从有效的串联段中获取连通的点
+        segments = self.get_serial_segments()
+        for from_id, to_id, _ in segments:
+            connected.add(from_id)
+            connected.add(to_id)
+
+        # 2. 从自定义路径中获取连通的点
+        for path_key in self.smooth_paths.keys():
+            if "_to_" in path_key:
+                parts = path_key.split("_to_")
+                if len(parts) == 2:
+                    from_id, to_id = parts
+                    connected.add(from_id)
+                    connected.add(to_id)
+                    print(f"[get_connected_points] 自定义路径连接: {from_id[:8]} <-> {to_id[:8]}")
+
+        return connected

@@ -29,6 +29,8 @@ class PickerCallback(QObject):
     """拾取回调信号"""
     point_picked = pyqtSignal(np.ndarray, int)  # (position, face_index)
     ir_point_selected = pyqtSignal(str)  # 选中的IR点ID
+    # 路径编辑信号
+    path_edit_points_changed = pyqtSignal(list)  # 路径编辑选中的点列表变化 [point_id, ...]
 
 
 class Viewer3D(QWidget):
@@ -54,6 +56,9 @@ class Viewer3D(QWidget):
         self._coord_axis_actors = {}  # 坐标轴actor
         self._coord_axes_visible = False
         self._origin_highlight_actor = None
+
+        # 路径编辑多选（Ctrl+点击）
+        self.path_edit_selected_points: List[str] = []  # 选中的点ID列表（最多2个）
 
         # 拾取回调
         self.picker_callback = PickerCallback()
@@ -355,10 +360,92 @@ class Viewer3D(QWidget):
                 closest_id = point_id
 
         if closest_id and min_dist < threshold:
+            # 检查是否按下了 Ctrl 键（用于路径编辑多选）
+            from PyQt5.QtWidgets import QApplication
+            modifiers = QApplication.keyboardModifiers()
+            from PyQt5.QtCore import Qt
+
+            if modifiers & Qt.ControlModifier:
+                # Ctrl+点击：路径编辑多选模式
+                self._handle_path_edit_ctrl_click(closest_id)
+                return True
+
+            # 普通模式：选中点
             self.select_ir_point(closest_id)
             return True
 
         return False
+
+    def _handle_path_edit_ctrl_click(self, point_id: str):
+        """处理路径编辑模式下的 Ctrl+点击"""
+        if point_id in self.path_edit_selected_points:
+            # 已选中的点，取消选择
+            self.path_edit_selected_points.remove(point_id)
+            self._update_path_edit_point_highlight(point_id, selected=False)
+            print(f"路径编辑: 取消选择点 {point_id}")
+        else:
+            # 新选择的点
+            if len(self.path_edit_selected_points) >= 2:
+                # 已经选了2个点，先取消第一个
+                old_id = self.path_edit_selected_points.pop(0)
+                self._update_path_edit_point_highlight(old_id, selected=False)
+
+            self.path_edit_selected_points.append(point_id)
+            self._update_path_edit_point_highlight(point_id, selected=True)
+            print(f"路径编辑: 选择点 {point_id} (已选 {len(self.path_edit_selected_points)} 个)")
+
+        # 发送选中点变化信号
+        self.picker_callback.path_edit_points_changed.emit(self.path_edit_selected_points.copy())
+
+    def _update_path_edit_point_highlight(self, point_id: str, selected: bool):
+        """更新路径编辑选中点的高亮显示"""
+        if point_id not in self.ir_point_positions:
+            return
+
+        is_center = self.ir_point_is_center.get(point_id, False)
+
+        # 路径编辑选中使用青色高亮
+        if selected:
+            self._update_ir_point_color_custom(point_id, '#00ffff')  # 青色
+        else:
+            # 恢复原来的颜色
+            normal_selected = (self.selected_ir_point_id == point_id)
+            self._update_ir_point_color(point_id, is_center, normal_selected)
+
+    def _update_ir_point_color_custom(self, point_id: str, color: str):
+        """使用自定义颜色更新IR点"""
+        if point_id not in self.ir_point_positions:
+            return
+
+        position = self.ir_point_positions[point_id]
+
+        # 移除旧的
+        if point_id in self.ir_point_actors:
+            try:
+                self.plotter.remove_actor(self.ir_point_actors[point_id])
+            except:
+                pass
+
+        # 计算球体半径（选中时稍大）
+        if self.mesh is not None:
+            bounds = self.mesh.bounds
+            size = np.linalg.norm(bounds[1] - bounds[0])
+            radius = size * 0.012  # 选中时稍大
+        else:
+            radius = 0.6
+
+        # 创建球体
+        sphere = pv.Sphere(radius=radius, center=position)
+
+        actor = self.plotter.add_mesh(
+            sphere,
+            name=f'ir_point_{point_id}',
+            color=color,
+            opacity=1.0,
+            pickable=False
+        )
+
+        self.ir_point_actors[point_id] = actor
 
     def select_ir_point(self, point_id: str):
         """选中IR点并高亮显示"""
@@ -996,6 +1083,35 @@ class Viewer3D(QWidget):
         """清除FPC动画网格"""
         try:
             self.plotter.remove_actor('fpc_animation')
+        except:
+            pass
+        self.plotter.render()
+
+    # ==================== 路径编辑模式 ====================
+
+    def get_path_edit_selected_points(self) -> List[str]:
+        """获取路径编辑模式中选中的点ID列表"""
+        return self.path_edit_selected_points.copy()
+
+    def clear_path_edit_selection(self):
+        """清除路径编辑选择"""
+        for point_id in self.path_edit_selected_points:
+            self._update_path_edit_point_highlight(point_id, selected=False)
+        self.path_edit_selected_points.clear()
+        # 发送选中点变化信号
+        self.picker_callback.path_edit_points_changed.emit([])
+
+    def remove_path_by_key(self, path_key: str):
+        """根据key移除路径可视化
+
+        Args:
+            path_key: 路径的key
+        """
+        actor_name = f'path_{path_key}'
+        try:
+            self.plotter.remove_actor(actor_name)
+            # 也从path_actors列表中移除
+            self.path_actors = [a for a in self.path_actors if a != actor_name]
         except:
             pass
         self.plotter.render()

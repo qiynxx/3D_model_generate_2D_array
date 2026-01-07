@@ -514,8 +514,35 @@ def flatten_paths_direct(
     for pid, angle in path_angles.items():
         print(f"  {pid[:8]}: {np.degrees(angle):.1f}°")
 
-    # 展开每条路径 - 使用带状展开
+    # ============ 分两阶段展开 ============
+    # 阶段1：先展开主要路径（星形或串联），确定IR点2D坐标
+    # 阶段2：再展开自定义路径，调整端点以匹配已确定的坐标
+
+    custom_paths = {}  # 保存自定义路径，稍后处理
+
+    # 对串联段路径进行排序，确保按顺序处理
+    sorted_path_items = []
+    serial_seg_items = []
     for point_id, path_3d in paths_3d.items():
+        if "_to_" in point_id:
+            custom_paths[point_id] = path_3d
+        elif point_id.startswith("serial_seg_"):
+            serial_seg_items.append((point_id, path_3d))
+        else:
+            sorted_path_items.append((point_id, path_3d))
+
+    # 串联段按编号排序
+    serial_seg_items.sort(key=lambda x: int(x[0].replace("serial_seg_", "")))
+    sorted_path_items.extend(serial_seg_items)
+
+    # 阶段1：展开主要路径
+    print(f"\n=== 阶段1：展开主要路径 ===")
+
+    # 记录上一段的终点2D位置，用于连接后续段
+    last_segment_end_2d = None
+    last_segment_end_3d = None
+
+    for point_id, path_3d in sorted_path_items:
         if len(path_3d) < 2:
             continue
 
@@ -529,41 +556,135 @@ def flatten_paths_direct(
 
         # 反转回来（从IR点到中心点）
         path_2d = path_2d[::-1]
+
+        # 对于串联段，检查是否需要调整位置以与前一段连接
+        if point_id.startswith("serial_seg_") and last_segment_end_2d is not None:
+            # 检查当前段的起点是否与上一段的终点接近（共享点）
+            current_start_3d = path_3d[0]
+            dist_to_last_end = np.linalg.norm(current_start_3d - last_segment_end_3d)
+            if dist_to_last_end < 5.0:  # 5mm内认为是共享点
+                # 平移整个路径使起点对齐
+                offset = last_segment_end_2d - path_2d[0]
+                path_2d = path_2d + offset
+                print(f"    调整段 {point_id} 以连接前一段，偏移: {offset}")
+
         paths_2d[point_id] = path_2d
         all_points.extend(path_2d.tolist())
+
+        # 记录当前段的终点
+        last_segment_end_2d = path_2d[-1].copy()
+        last_segment_end_3d = path_3d[-1].copy()
 
         # 验证长度
         path_3d_length = np.sum(np.linalg.norm(np.diff(path_3d, axis=0), axis=1))
         path_2d_length = np.sum(np.linalg.norm(np.diff(path_2d, axis=0), axis=1))
         ratio = path_2d_length / path_3d_length if path_3d_length > 0 else 0
 
-        print(f"\n  路径 {point_id[:8]}:")
+        print(f"\n  主路径 {point_id[:16]}:")
         print(f"    3D长度: {path_3d_length:.4f}")
         print(f"    2D长度: {path_2d_length:.4f}")
         print(f"    长度比例: {ratio:.6f} (误差: {abs(ratio-1)*100:.4f}%)")
 
         # IR点2D位置
-        if point_id == "serial":
+        if point_id == "serial" or point_id.startswith("serial_seg_"):
             # 串联模式：为每个IR点找到路径上最近的点
             for ir_id, (ir_pos_3d, ir_name, ir_is_center) in ir_points.items():
                 if ir_is_center:
                     continue  # 中心点单独处理
+                if ir_id in ir_points_2d:
+                    continue  # 已经处理过的点跳过
                 # 找到3D路径上离IR点最近的点
                 distances = np.linalg.norm(path_3d - ir_pos_3d, axis=1)
-                nearest_idx = np.argmin(distances)
-                # 使用对应的2D坐标
-                ir_points_2d[ir_id] = (path_2d[nearest_idx].copy(), ir_name, ir_is_center)
-                print(f"    IR点 {ir_name}: 3D={ir_pos_3d} -> 2D={path_2d[nearest_idx]}")
+                min_distance = np.min(distances)
+                # 只有当点足够接近路径时才使用这个路径的2D坐标
+                if min_distance < 5.0:  # 5mm阈值，可调整
+                    nearest_idx = np.argmin(distances)
+                    # 使用对应的2D坐标
+                    ir_points_2d[ir_id] = (path_2d[nearest_idx].copy(), ir_name, ir_is_center)
+                    print(f"    IR点 {ir_name}: 2D={path_2d[nearest_idx]} (距离路径 {min_distance:.2f}mm)")
         else:
             # 星形模式：路径ID就是IR点ID
             ir_info = ir_points.get(point_id)
             if ir_info:
                 ir_points_2d[point_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+                print(f"    IR点 {ir_info[1]}: 2D={path_2d[0]}")
 
-    # 添加中心点
+    # 添加中心点（在处理自定义路径之前）
     for point_id, (pos, name, is_center) in ir_points.items():
         if is_center:
             ir_points_2d[point_id] = (center_2d.copy(), name, True)
+            print(f"  中心点 {name}: 2D={center_2d}")
+
+    # 阶段2：展开自定义路径
+    print(f"\n=== 阶段2：展开自定义路径 ({len(custom_paths)} 条) ===")
+    for point_id, path_3d in custom_paths.items():
+        if len(path_3d) < 2:
+            continue
+
+        parts = point_id.split("_to_")
+        if len(parts) != 2:
+            continue
+        from_id, to_id = parts
+
+        print(f"\n  自定义路径 {point_id[:24]}:")
+        print(f"    起点ID: {from_id[:8]}, 终点ID: {to_id[:8]}")
+
+        # 检查端点是否已有2D坐标
+        from_has_2d = from_id in ir_points_2d
+        to_has_2d = to_id in ir_points_2d
+
+        print(f"    起点已确定: {from_has_2d}, 终点已确定: {to_has_2d}")
+
+        # 先正常展开路径
+        initial_angle = path_angles.get(point_id, 0.0)
+        path_from_center = path_3d[::-1]
+        path_2d = _unfold_groove_strip(path_from_center, mesh, initial_angle)
+        path_2d = path_2d[::-1]
+
+        # 根据已确定的端点调整路径
+        if from_has_2d and to_has_2d:
+            # 两端都已确定，线性变换路径使端点匹配
+            from_2d_target = ir_points_2d[from_id][0]
+            to_2d_target = ir_points_2d[to_id][0]
+            path_2d = _adjust_path_endpoints(path_2d, from_2d_target, to_2d_target)
+            print(f"    调整端点: {path_2d[0]} -> {path_2d[-1]}")
+        elif from_has_2d:
+            # 只有起点已确定，平移路径
+            from_2d_target = ir_points_2d[from_id][0]
+            offset = from_2d_target - path_2d[0]
+            path_2d = path_2d + offset
+            # 设置终点
+            if to_id in ir_points and to_id not in ir_points_2d:
+                ir_info = ir_points[to_id]
+                ir_points_2d[to_id] = (path_2d[-1].copy(), ir_info[1], ir_info[2])
+            print(f"    平移到起点: {path_2d[0]}")
+        elif to_has_2d:
+            # 只有终点已确定，平移路径
+            to_2d_target = ir_points_2d[to_id][0]
+            offset = to_2d_target - path_2d[-1]
+            path_2d = path_2d + offset
+            # 设置起点
+            if from_id in ir_points and from_id not in ir_points_2d:
+                ir_info = ir_points[from_id]
+                ir_points_2d[from_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+            print(f"    平移到终点: {path_2d[-1]}")
+        else:
+            # 两端都未确定，使用路径本身的坐标
+            if from_id in ir_points:
+                ir_info = ir_points[from_id]
+                ir_points_2d[from_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+            if to_id in ir_points:
+                ir_info = ir_points[to_id]
+                ir_points_2d[to_id] = (path_2d[-1].copy(), ir_info[1], ir_info[2])
+            print(f"    使用原始坐标: {path_2d[0]} -> {path_2d[-1]}")
+
+        paths_2d[point_id] = path_2d
+        all_points.extend(path_2d.tolist())
+
+        # 验证长度
+        path_3d_length = np.sum(np.linalg.norm(np.diff(path_3d, axis=0), axis=1))
+        path_2d_length = np.sum(np.linalg.norm(np.diff(path_2d, axis=0), axis=1))
+        print(f"    3D长度: {path_3d_length:.4f}, 2D长度: {path_2d_length:.4f}")
 
     # 计算边界
     if len(all_points) > 0:
@@ -590,6 +711,72 @@ def flatten_paths_direct(
         total_bounds=(min_bounds, max_bounds),
         uv_coords=uv_coords
     )
+
+
+def _adjust_path_endpoints(
+    path_2d: np.ndarray,
+    from_target: np.ndarray,
+    to_target: np.ndarray
+) -> np.ndarray:
+    """
+    调整2D路径的端点以匹配目标坐标
+
+    使用仿射变换，保持路径形状的同时调整端点位置
+
+    Args:
+        path_2d: 原始2D路径点数组
+        from_target: 起点目标坐标
+        to_target: 终点目标坐标
+
+    Returns:
+        调整后的2D路径
+    """
+    if len(path_2d) < 2:
+        return path_2d
+
+    # 原始端点
+    from_orig = path_2d[0]
+    to_orig = path_2d[-1]
+
+    # 原始向量
+    orig_vec = to_orig - from_orig
+    orig_length = np.linalg.norm(orig_vec)
+
+    # 目标向量
+    target_vec = to_target - from_target
+    target_length = np.linalg.norm(target_vec)
+
+    if orig_length < 1e-10 or target_length < 1e-10:
+        # 退化情况：简单平移
+        return path_2d + (from_target - from_orig)
+
+    # 计算缩放和旋转
+    scale = target_length / orig_length
+
+    # 计算旋转角度
+    orig_angle = np.arctan2(orig_vec[1], orig_vec[0])
+    target_angle = np.arctan2(target_vec[1], target_vec[0])
+    rotation = target_angle - orig_angle
+
+    # 创建旋转矩阵
+    cos_r = np.cos(rotation)
+    sin_r = np.sin(rotation)
+    rot_matrix = np.array([[cos_r, -sin_r], [sin_r, cos_r]])
+
+    # 变换路径：先平移到原点，旋转，缩放，再平移到目标起点
+    adjusted_path = []
+    for point in path_2d:
+        # 平移到原点
+        p = point - from_orig
+        # 旋转
+        p = rot_matrix @ p
+        # 缩放
+        p = p * scale
+        # 平移到目标起点
+        p = p + from_target
+        adjusted_path.append(p)
+
+    return np.array(adjusted_path)
 
 
 def _unfold_groove_strip(
@@ -1336,22 +1523,18 @@ def flatten_paths_with_arc_length(
         else:
             path_angles[point_id] = 0.0
 
-    # 展开每条路径
-    for point_id, path_3d in paths_3d.items():
-        if len(path_3d) < 2:
-            continue
+    # ============ 分两阶段展开 ============
+    custom_paths = {}  # 保存自定义路径
 
-        # 从中心点开始展开（反转路径）
+    # 内部函数：展开单条路径
+    def unfold_single_path(path_3d, start_angle):
         path_from_center = path_3d[::-1]
-        start_angle = path_angles.get(point_id, 0.0)
-
-        path_2d = [center_2d.copy()]
+        path_2d_list = [center_2d.copy()]
         current_angle = start_angle
 
         for i in range(1, len(path_from_center)):
             segment_length = np.linalg.norm(path_from_center[i] - path_from_center[i-1])
 
-            # 计算方向变化
             if i >= 2:
                 prev_dir = path_from_center[i-1] - path_from_center[i-2]
                 curr_dir = path_from_center[i] - path_from_center[i-1]
@@ -1364,7 +1547,6 @@ def flatten_paths_with_arc_length(
                     dot = np.clip(np.dot(prev_dir, curr_dir), -1, 1)
                     angle_change = np.arccos(dot)
 
-                    # 使用切平面投影确定转向方向
                     prev_proj = prev_dir - np.dot(prev_dir, normal) * normal
                     curr_proj = curr_dir - np.dot(curr_dir, normal) * normal
                     cross = np.cross(prev_proj, curr_proj)
@@ -1374,30 +1556,70 @@ def flatten_paths_with_arc_length(
 
                     current_angle += sign * angle_change
 
-            new_point = path_2d[-1] + segment_length * np.array([
+            new_point = path_2d_list[-1] + segment_length * np.array([
                 np.cos(current_angle),
                 np.sin(current_angle)
             ])
-            path_2d.append(new_point)
+            path_2d_list.append(new_point)
 
-        # 反转回来（从IR点到中心点）
-        path_2d = np.array(path_2d[::-1])
+        return np.array(path_2d_list[::-1])
+
+    # 对串联段路径进行排序，确保按顺序处理
+    sorted_path_items = []
+    serial_seg_items = []
+    for point_id, path_3d in paths_3d.items():
+        if "_to_" in point_id:
+            custom_paths[point_id] = path_3d
+        elif point_id.startswith("serial_seg_"):
+            serial_seg_items.append((point_id, path_3d))
+        else:
+            sorted_path_items.append((point_id, path_3d))
+
+    # 串联段按编号排序
+    serial_seg_items.sort(key=lambda x: int(x[0].replace("serial_seg_", "")))
+    sorted_path_items.extend(serial_seg_items)
+
+    # 记录上一段的终点2D位置，用于连接后续段
+    last_segment_end_2d = None
+    last_segment_end_3d = None
+
+    # 阶段1：展开主要路径
+    for point_id, path_3d in sorted_path_items:
+        if len(path_3d) < 2:
+            continue
+
+        start_angle = path_angles.get(point_id, 0.0)
+        path_2d = unfold_single_path(path_3d, start_angle)
+
+        # 对于串联段，检查是否需要调整位置以与前一段连接
+        if point_id.startswith("serial_seg_") and last_segment_end_2d is not None:
+            current_start_3d = path_3d[0]
+            dist_to_last_end = np.linalg.norm(current_start_3d - last_segment_end_3d)
+            if dist_to_last_end < 5.0:  # 5mm内认为是共享点
+                offset = last_segment_end_2d - path_2d[0]
+                path_2d = path_2d + offset
+
         paths_2d[point_id] = path_2d
         all_points.extend(path_2d.tolist())
 
-        # IR点的2D位置
-        if point_id == "serial":
-            # 串联模式：为每个IR点找到路径上最近的点
+        # 记录当前段的终点
+        last_segment_end_2d = path_2d[-1].copy()
+        last_segment_end_3d = path_3d[-1].copy()
+
+        # IR点2D位置
+        if point_id == "serial" or point_id.startswith("serial_seg_"):
             for ir_id, (ir_pos_3d, ir_name, ir_is_center) in ir_points.items():
                 if ir_is_center:
                     continue
-                # 找到3D路径上离IR点最近的点
+                if ir_id in ir_points_2d:
+                    continue  # 已经处理过的点跳过
                 distances = np.linalg.norm(path_3d - ir_pos_3d, axis=1)
-                nearest_idx = np.argmin(distances)
-                # 使用对应的2D坐标
-                ir_points_2d[ir_id] = (path_2d[nearest_idx].copy(), ir_name, ir_is_center)
+                min_distance = np.min(distances)
+                # 只有当点足够接近路径时才使用这个路径的2D坐标
+                if min_distance < 5.0:  # 5mm阈值
+                    nearest_idx = np.argmin(distances)
+                    ir_points_2d[ir_id] = (path_2d[nearest_idx].copy(), ir_name, ir_is_center)
         else:
-            # 星形模式：路径ID就是IR点ID
             ir_info = ir_points.get(point_id)
             if ir_info and len(path_2d) > 0:
                 ir_points_2d[point_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
@@ -1406,6 +1628,52 @@ def flatten_paths_with_arc_length(
     for point_id, (pos, name, is_center) in ir_points.items():
         if is_center:
             ir_points_2d[point_id] = (center_2d.copy(), name, True)
+
+    # 阶段2：展开自定义路径
+    for point_id, path_3d in custom_paths.items():
+        if len(path_3d) < 2:
+            continue
+
+        parts = point_id.split("_to_")
+        if len(parts) != 2:
+            continue
+        from_id, to_id = parts
+
+        start_angle = path_angles.get(point_id, 0.0)
+        path_2d = unfold_single_path(path_3d, start_angle)
+
+        # 检查端点是否已有2D坐标
+        from_has_2d = from_id in ir_points_2d
+        to_has_2d = to_id in ir_points_2d
+
+        if from_has_2d and to_has_2d:
+            from_2d_target = ir_points_2d[from_id][0]
+            to_2d_target = ir_points_2d[to_id][0]
+            path_2d = _adjust_path_endpoints(path_2d, from_2d_target, to_2d_target)
+        elif from_has_2d:
+            from_2d_target = ir_points_2d[from_id][0]
+            offset = from_2d_target - path_2d[0]
+            path_2d = path_2d + offset
+            if to_id in ir_points and to_id not in ir_points_2d:
+                ir_info = ir_points[to_id]
+                ir_points_2d[to_id] = (path_2d[-1].copy(), ir_info[1], ir_info[2])
+        elif to_has_2d:
+            to_2d_target = ir_points_2d[to_id][0]
+            offset = to_2d_target - path_2d[-1]
+            path_2d = path_2d + offset
+            if from_id in ir_points and from_id not in ir_points_2d:
+                ir_info = ir_points[from_id]
+                ir_points_2d[from_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+        else:
+            if from_id in ir_points:
+                ir_info = ir_points[from_id]
+                ir_points_2d[from_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+            if to_id in ir_points:
+                ir_info = ir_points[to_id]
+                ir_points_2d[to_id] = (path_2d[-1].copy(), ir_info[1], ir_info[2])
+
+        paths_2d[point_id] = path_2d
+        all_points.extend(path_2d.tolist())
 
     # 计算边界
     all_points_array = np.array(all_points)
@@ -1665,9 +1933,60 @@ def generate_fpc_layout(
                 groove_outlines[point_id] = outline
                 all_outline_points.extend(outline.tolist())
 
-    # 检查是否为串联模式（只有一个 "serial" 路径）
-    is_serial_mode = len(flatten_result.paths_2d) == 1 and "serial" in flatten_result.paths_2d
-    serial_path_2d = flatten_result.paths_2d.get("serial") if is_serial_mode else None
+    # 检查是否为串联模式（有 "serial" 路径或 "serial_seg_*" 路径）
+    serial_path_keys = [k for k in flatten_result.paths_2d.keys()
+                        if k == "serial" or k.startswith("serial_seg_")]
+    is_serial_mode = len(serial_path_keys) > 0
+    # 获取串联路径用于方向计算（优先使用完整的serial路径，否则合并所有段）
+    if "serial" in flatten_result.paths_2d:
+        serial_path_2d = flatten_result.paths_2d.get("serial")
+    elif serial_path_keys:
+        # 合并所有串联段路径用于方向计算
+        all_serial_points = []
+        for key in sorted(serial_path_keys):
+            all_serial_points.extend(flatten_result.paths_2d[key].tolist())
+        serial_path_2d = np.array(all_serial_points) if all_serial_points else None
+    else:
+        serial_path_2d = None
+
+    # 辅助函数：查找与某个IR点相连的路径
+    def find_path_for_point(point_id: str) -> Optional[Tuple[np.ndarray, int]]:
+        """
+        查找与某个IR点相连的路径
+
+        Returns:
+            (path_2d, point_index) path_2d是2D路径，point_index是该点在路径中的索引（0=起点，-1=终点）
+        """
+        # 1. 星形模式：key就是点ID
+        if point_id in flatten_result.paths_2d:
+            return (flatten_result.paths_2d[point_id], 0)
+
+        # 2. 检查自定义路径：key格式为 from_id_to_to_id
+        for path_key, path_2d in flatten_result.paths_2d.items():
+            if "_to_" in path_key:
+                parts = path_key.split("_to_")
+                if len(parts) == 2:
+                    from_id, to_id = parts
+                    if from_id == point_id:
+                        return (path_2d, 0)  # 该点是路径起点
+                    elif to_id == point_id:
+                        return (path_2d, -1)  # 该点是路径终点
+
+        # 3. 串联模式段路径：查找包含该点的段
+        if is_serial_mode and point_id in flatten_result.ir_points_2d:
+            point_pos = flatten_result.ir_points_2d[point_id][0]
+            for path_key, path_2d in flatten_result.paths_2d.items():
+                if path_key == "serial" or path_key.startswith("serial_seg_"):
+                    if len(path_2d) >= 2:
+                        # 查找路径上最近的点
+                        distances = np.linalg.norm(path_2d - point_pos, axis=1)
+                        min_dist = np.min(distances)
+                        if min_dist < 1.0:  # 1mm阈值
+                            nearest_idx = np.argmin(distances)
+                            # 返回路径和一个特殊索引表示使用nearest计算
+                            return (path_2d, nearest_idx)
+
+        return None
 
     # 生成IR点焊盘
     for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
@@ -1682,10 +2001,26 @@ def generate_fpc_layout(
                 pad_l, pad_w = rectangular_pad_length, rectangular_pad_width
 
             # 计算路径方向
-            path_2d = flatten_result.paths_2d.get(point_id)
-            if path_2d is not None and len(path_2d) >= 2:
-                # 星形模式：路径方向从第一个点（IR点）到第二个点
-                direction = path_2d[1] - path_2d[0]
+            path_info = find_path_for_point(point_id)
+            if path_info is not None:
+                path_2d, point_index = path_info
+                if len(path_2d) >= 2:
+                    if point_index == 0:
+                        # 该点是路径起点，方向从第一个点到第二个点
+                        direction = path_2d[1] - path_2d[0]
+                    elif point_index == -1 or point_index == len(path_2d) - 1:
+                        # 该点是路径终点，方向从倒数第二个点到最后一个点
+                        direction = path_2d[-1] - path_2d[-2]
+                    else:
+                        # 串联模式：点在路径中间，使用相邻点计算方向
+                        if point_index > 0:
+                            direction = path_2d[point_index] - path_2d[point_index - 1]
+                        elif point_index < len(path_2d) - 1:
+                            direction = path_2d[point_index + 1] - path_2d[point_index]
+                        else:
+                            direction = np.array([1.0, 0.0])
+                else:
+                    direction = np.array([1.0, 0.0])
             elif is_serial_mode and serial_path_2d is not None and len(serial_path_2d) >= 2:
                 # 串联模式：找到路径上最近的点，计算方向
                 distances = np.linalg.norm(serial_path_2d - pos, axis=1)
