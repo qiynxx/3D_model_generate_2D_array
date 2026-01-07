@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import uuid
 import heapq
 from scipy.interpolate import splprep, splev, CubicSpline
-from .path_planner_2d import plan_paths_on_surface
+from .path_planner_2d import plan_paths_on_surface, compute_geodesic_dijkstra
 
 
 def project_point_to_mesh(point: np.ndarray, mesh: trimesh.Trimesh) -> np.ndarray:
@@ -343,6 +343,15 @@ class PathManager:
         self.smooth_paths: Dict[str, np.ndarray] = {}  # 平滑后的路径
         self.smoothness: float = 0.5  # 平滑度参数
         self._point_counter: int = 0  # 点序号计数器
+        self.serial_order: List[str] = []  # 串联模式的点顺序（用户指定）
+
+    def set_serial_order(self, order: List[str]):
+        """设置串联顺序"""
+        self.serial_order = order.copy()
+
+    def get_serial_order(self) -> List[str]:
+        """获取串联顺序"""
+        return self.serial_order.copy()
 
     def set_smoothness(self, smoothness: float):
         """设置平滑度 (0-1)"""
@@ -510,6 +519,172 @@ class PathManager:
         print("#"*60 + "\n")
         return self.paths
 
+    def compute_serial_path(self, smooth: bool = True, exclude_point_ids: list = None) -> Dict[str, Tuple[List[int], np.ndarray]]:
+        """
+        计算串联路径：使用一根线按顺序连接所有IR点
+
+        不需要中心点，直接按顺序连接所有点
+
+        Args:
+            smooth: 是否额外平滑
+            exclude_point_ids: 要排除的点ID列表
+
+        Returns:
+            包含单条路径的字典 {"serial": ([], path_points)}
+        """
+        self.paths.clear()
+        self.smooth_paths.clear()
+
+        if exclude_point_ids is None:
+            exclude_point_ids = []
+
+        print("\n" + "#"*60)
+        print("# 开始计算串联路径")
+        print("#"*60)
+
+        # 收集所有IR点（串联模式不排除中心点）
+        ir_points_list = []
+        for point_id, point in self.ir_points.items():
+            if point_id in exclude_point_ids:
+                print(f"  {point.name} ({point_id[:8]}): 已排除")
+                continue
+            ir_points_list.append((point_id, point))
+
+        if len(ir_points_list) < 2:
+            print("警告: 至少需要2个IR点才能串联")
+            return self.paths
+
+        print(f"\n共有 {len(ir_points_list)} 个IR点需要串联")
+
+        # 创建ID到点的映射
+        id_to_point = {pid: pt for pid, pt in ir_points_list}
+
+        # 使用用户指定的顺序（如果有）
+        if self.serial_order:
+            # 按用户指定顺序排列
+            ordered_points = []
+            for pid in self.serial_order:
+                if pid in id_to_point:
+                    ordered_points.append((pid, id_to_point[pid]))
+
+            # 添加不在顺序中的点（使用最近邻算法）
+            remaining = [(pid, pt) for pid, pt in ir_points_list if pid not in self.serial_order]
+            if remaining:
+                if ordered_points:
+                    last_pos = ordered_points[-1][1].position
+                else:
+                    last_pos = remaining[0][1].position
+                remaining_ordered = self._compute_nearest_neighbor_order(remaining, last_pos)
+                ordered_points.extend(remaining_ordered)
+
+            print(f"\n串联顺序 (用户指定):")
+        else:
+            # 回退到最近邻算法，从第一个点开始
+            first_point = ir_points_list[0]
+            remaining = ir_points_list[1:]
+            ordered_points = [first_point]
+            if remaining:
+                remaining_ordered = self._compute_nearest_neighbor_order(remaining, first_point[1].position)
+                ordered_points.extend(remaining_ordered)
+            print(f"\n串联顺序 (自动计算):")
+
+        for i, (pid, pt) in enumerate(ordered_points):
+            print(f"  {i+1}. {pt.name}")
+
+        print(f"\n计算各段路径（使用表面步进法）...")
+
+        full_path_points = []
+        total_length = 0
+
+        # 连接相邻点（不再连接到中心点）
+        for i in range(len(ordered_points) - 1):
+            start_point = ordered_points[i][1].position
+            end_point = ordered_points[i + 1][1].position
+
+            # 使用与星形连接相同的表面步进法计算路径
+            segment_path = compute_geodesic_dijkstra(
+                self.mesh,
+                start_point,
+                end_point,
+                num_samples=60,
+                smooth_path=False,
+                turn_penalty=2.0,
+                normal_penalty=5.0
+            )
+
+            if len(segment_path) == 0:
+                # 回退到直接投影法
+                segment_path = create_smooth_direct_path(
+                    start_point, end_point, self.mesh, num_points=30
+                )
+
+            if len(segment_path) > 0:
+                # 避免重复的端点
+                if len(full_path_points) > 0:
+                    segment_path = segment_path[1:]  # 跳过第一个点（与上一段的终点重复）
+
+                if len(segment_path) > 0:
+                    full_path_points.extend(segment_path)
+                    seg_length = np.sum(np.linalg.norm(np.diff(segment_path, axis=0), axis=1)) if len(segment_path) > 1 else 0
+                    total_length += seg_length
+
+        if len(full_path_points) > 0:
+            full_path = np.array(full_path_points)
+            print(f"\n串联路径: {len(full_path)} 点, 总长度 {total_length:.2f}")
+
+            # 保存为单条路径，使用特殊的key "serial"
+            self.paths["serial"] = ([], full_path)
+            self.smooth_paths["serial"] = full_path
+
+            # 更新连接信息
+            for i, (pid, point) in enumerate(ordered_points):
+                if i + 1 < len(ordered_points):
+                    point.connections = [ordered_points[i + 1][0]]
+                else:
+                    point.connections = []  # 最后一个点没有后续连接
+
+        print(f"\n串联路径计算完成")
+        print("#"*60 + "\n")
+        return self.paths
+
+    def _compute_nearest_neighbor_order(self, ir_points_list: List[Tuple[str, 'IRPoint']], start_position: np.ndarray) -> List[Tuple[str, 'IRPoint']]:
+        """
+        使用最近邻算法确定访问顺序
+
+        从起点开始，每次选择距离当前点最近的未访问点
+
+        Args:
+            ir_points_list: IR点列表 [(point_id, IRPoint), ...]
+            start_position: 起始位置（路径终点位置）
+
+        Returns:
+            按访问顺序排列的点列表
+        """
+        if not ir_points_list:
+            return []
+
+        remaining = list(ir_points_list)
+        ordered = []
+        current_pos = start_position
+
+        while remaining:
+            # 找最近的点
+            min_dist = float('inf')
+            nearest_idx = 0
+
+            for i, (pid, point) in enumerate(remaining):
+                dist = np.linalg.norm(point.position - current_pos)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_idx = i
+
+            # 添加到有序列表
+            nearest = remaining.pop(nearest_idx)
+            ordered.append(nearest)
+            current_pos = nearest[1].position
+
+        return ordered
+
     def _smooth_path_iterative(self, path: np.ndarray, alpha: float = 0.5) -> np.ndarray:
         """迭代平滑路径（移动平均）"""
         if len(path) < 3:
@@ -562,10 +737,13 @@ class PathManager:
                     'connections': p.connections,
                     'group': p.group,
                     'name': p.name,
+                    'pad_length': p.pad_length,
+                    'pad_width': p.pad_width,
                 }
                 for pid, p in self.ir_points.items()
             },
             'center_point_id': self.center_point_id,
+            'serial_order': self.serial_order,
         }
 
     def from_dict(self, data: dict):
@@ -583,6 +761,10 @@ class PathManager:
                 group=pdata['group'],
                 name=pdata['name'],
             )
+            # 加载焊盘尺寸（兼容旧格式）
+            point.pad_length = pdata.get('pad_length', 3.0)
+            point.pad_width = pdata.get('pad_width', 2.0)
             self.ir_points[pid] = point
 
         self.center_point_id = data.get('center_point_id')
+        self.serial_order = data.get('serial_order', [])

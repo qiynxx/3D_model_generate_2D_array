@@ -435,20 +435,20 @@ def flatten_paths_direct(
     mesh: trimesh.Trimesh
 ) -> PathFlattenResult:
     """
-    直接路径展开算法 - 精确保持路径长度和曲率
+    凹槽带状展开算法 - 只展开路径周围的窄带区域
 
-    对于闭合曲面（无边界），不尝试展开整个曲面，而是直接展开路径：
-    1. 保持每段路径的弧长
-    2. 保持路径的转向角度（测地曲率）
-    3. 路径在2D中保留其弯曲形状
+    不展开整个曲面，而是将每条路径作为一个独立的带状区域展开：
+    1. 沿路径计算累积弧长
+    2. 保持每段的长度和转角
+    3. 凹槽宽度方向直接保持（窄带近似）
 
-    这种方法保证：
-    - 每条路径的2D长度完全等于3D测地线长度
-    - 路径的弯曲形状被保留
-    - FPC可以精确贴合在3D曲面上
+    这种方法：
+    - 精确保持路径长度
+    - 保持路径的弯曲形状
+    - 避免闭合曲面展开的问题
     """
     print("\n" + "="*60)
-    print("使用直接路径展开算法（保持路径长度和曲率）")
+    print("使用凹槽带状展开算法")
     print("="*60)
 
     paths_2d = {}
@@ -487,25 +487,14 @@ def flatten_paths_direct(
     x_axis = x_axis / (np.linalg.norm(x_axis) + 1e-10)
     y_axis = np.cross(center_normal, x_axis)
 
-    # 计算每条路径相对于中心的初始角度
-    # 使用路径到达中心时的切线方向（投影到切平面）
-    # 这是FPC在中心点实际连接的方向
+    # 计算每条路径在中心点的切线方向角度
     path_angles = {}
     for point_id, path_3d in paths_3d.items():
         if len(path_3d) < 2:
             continue
 
-        # 路径从IR点到中心点，最后一段是到达中心的方向
-        # 使用最后几个点来计算更稳定的方向
-        if len(path_3d) >= 3:
-            # 使用最后3个点的方向平均
-            dir1 = path_3d[-1] - path_3d[-2]
-            dir2 = path_3d[-2] - path_3d[-3] if len(path_3d) >= 3 else dir1
-            last_segment = (dir1 + dir2) / 2
-        else:
-            last_segment = path_3d[-1] - path_3d[-2]
-
-        # 这是路径到达中心的方向，取反得到从中心出发的方向
+        # 使用路径到达中心时的切线方向
+        last_segment = path_3d[-1] - path_3d[-2]
         outward_direction = -last_segment
 
         # 投影到中心点的切平面
@@ -518,41 +507,25 @@ def flatten_paths_direct(
             y = np.dot(proj, y_axis)
             path_angles[point_id] = np.arctan2(y, x)
         else:
-            # 回退：使用IR点方向
-            ir_pos = path_3d[0]
-            direction = ir_pos - center_position
-            proj = direction - np.dot(direction, center_normal) * center_normal
-            proj_len = np.linalg.norm(proj)
-            if proj_len > 1e-10:
-                proj = proj / proj_len
-                x = np.dot(proj, x_axis)
-                y = np.dot(proj, y_axis)
-                path_angles[point_id] = np.arctan2(y, x)
-            else:
-                path_angles[point_id] = 0.0
+            path_angles[point_id] = 0.0
 
-    # 打印路径角度信息（调试用）
     print(f"\n路径数: {len(paths_3d)}")
-    print(f"路径角度 (基于路径在中心点的切线方向):")
+    print(f"路径角度:")
     for pid, angle in path_angles.items():
         print(f"  {pid[:8]}: {np.degrees(angle):.1f}°")
 
-    # 展开每条路径 - 保持长度和曲率
+    # 展开每条路径 - 使用带状展开
     for point_id, path_3d in paths_3d.items():
         if len(path_3d) < 2:
             continue
 
         initial_angle = path_angles.get(point_id, 0.0)
 
-        # 路径从IR点到中心点，我们从中心向外展开
-        # 反转路径：从中心开始
+        # 路径从IR点到中心点，反转为从中心开始
         path_from_center = path_3d[::-1]
 
-        # 使用曲率保持的展开方法
-        path_2d = _unfold_path_with_curvature(
-            path_from_center, center_position, center_normal,
-            x_axis, y_axis, initial_angle, mesh
-        )
+        # 使用带状展开方法
+        path_2d = _unfold_groove_strip(path_from_center, mesh, initial_angle)
 
         # 反转回来（从IR点到中心点）
         path_2d = path_2d[::-1]
@@ -570,9 +543,22 @@ def flatten_paths_direct(
         print(f"    长度比例: {ratio:.6f} (误差: {abs(ratio-1)*100:.4f}%)")
 
         # IR点2D位置
-        ir_info = ir_points.get(point_id)
-        if ir_info:
-            ir_points_2d[point_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+        if point_id == "serial":
+            # 串联模式：为每个IR点找到路径上最近的点
+            for ir_id, (ir_pos_3d, ir_name, ir_is_center) in ir_points.items():
+                if ir_is_center:
+                    continue  # 中心点单独处理
+                # 找到3D路径上离IR点最近的点
+                distances = np.linalg.norm(path_3d - ir_pos_3d, axis=1)
+                nearest_idx = np.argmin(distances)
+                # 使用对应的2D坐标
+                ir_points_2d[ir_id] = (path_2d[nearest_idx].copy(), ir_name, ir_is_center)
+                print(f"    IR点 {ir_name}: 3D={ir_pos_3d} -> 2D={path_2d[nearest_idx]}")
+        else:
+            # 星形模式：路径ID就是IR点ID
+            ir_info = ir_points.get(point_id)
+            if ir_info:
+                ir_points_2d[point_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
 
     # 添加中心点
     for point_id, (pos, name, is_center) in ir_points.items():
@@ -589,7 +575,7 @@ def flatten_paths_direct(
         min_bounds = np.array([-10, -10])
         max_bounds = np.array([10, 10])
 
-    # 为动画生成UV坐标（使用径向投影）
+    # 为动画生成UV坐标
     print(f"\n生成动画用UV坐标...")
     uv_coords = _generate_radial_uv_for_animation(mesh, center_position, center_normal, x_axis, y_axis)
     print(f"  UV坐标生成完成: {len(uv_coords)} 顶点")
@@ -606,28 +592,22 @@ def flatten_paths_direct(
     )
 
 
-def _unfold_path_with_curvature(
+def _unfold_groove_strip(
     path_3d: np.ndarray,
-    center_position: np.ndarray,
-    center_normal: np.ndarray,
-    x_axis: np.ndarray,
-    y_axis: np.ndarray,
-    initial_angle: float,
-    mesh: trimesh.Trimesh
+    mesh: trimesh.Trimesh,
+    initial_angle: float
 ) -> np.ndarray:
     """
-    展开单条路径，保持长度和曲率
+    展开单条凹槽带状区域
 
-    通过保持每段的长度和相邻段之间的转向角度来展开路径。
-    转向角度从3D路径的测地曲率计算得出。
+    将3D路径展开为2D，保持：
+    1. 每段的精确长度
+    2. 相邻段之间的转角（测地曲率）
 
     Args:
         path_3d: 3D路径点（从中心开始）
-        center_position: 中心点位置
-        center_normal: 中心点法向量
-        x_axis, y_axis: 切平面坐标轴
+        mesh: 3D网格（用于获取表面法向量）
         initial_angle: 初始方向角度
-        mesh: 3D网格
 
     Returns:
         path_2d: 2D路径点数组
@@ -639,7 +619,7 @@ def _unfold_path_with_curvature(
     path_2d = np.zeros((n_points, 2))
     path_2d[0] = [0.0, 0.0]  # 中心点在原点
 
-    # 当前方向角度
+    # 当前2D方向角度
     current_angle = initial_angle
 
     for i in range(1, n_points):
@@ -651,37 +631,12 @@ def _unfold_path_with_curvature(
             path_2d[i] = path_2d[i-1].copy()
             continue
 
-        # 计算转向角度（从3D路径的方向变化）
+        # 计算转向角度
         if i >= 2:
-            # 前一段方向
-            prev_segment = path_3d[i-1] - path_3d[i-2]
-            prev_length = np.linalg.norm(prev_segment)
-
-            if prev_length > 1e-10 and segment_length > 1e-10:
-                prev_dir = prev_segment / prev_length
-                curr_dir = segment_3d / segment_length
-
-                # 获取当前点的表面法向量
-                try:
-                    _, _, face_idx = mesh.nearest.on_surface([path_3d[i-1]])
-                    face = mesh.faces[int(face_idx[0])]
-                    v0, v1, v2 = mesh.vertices[face]
-                    e1 = v1 - v0
-                    e2 = v2 - v0
-                    local_normal = np.cross(e1, e2)
-                    local_normal = local_normal / (np.linalg.norm(local_normal) + 1e-10)
-                except:
-                    local_normal = center_normal
-
-                # 计算转向角度（带符号）
-                # 使用叉积确定转向方向
-                cross = np.cross(prev_dir, curr_dir)
-                sin_angle = np.dot(cross, local_normal)
-                cos_angle = np.dot(prev_dir, curr_dir)
-                cos_angle = np.clip(cos_angle, -1, 1)
-
-                turn_angle = np.arctan2(sin_angle, cos_angle)
-                current_angle += turn_angle
+            turn_angle = _compute_geodesic_turn_angle(
+                path_3d[i-2], path_3d[i-1], path_3d[i], mesh
+            )
+            current_angle += turn_angle
 
         # 计算新的2D位置
         dx = segment_length * np.cos(current_angle)
@@ -689,6 +644,80 @@ def _unfold_path_with_curvature(
         path_2d[i] = path_2d[i-1] + np.array([dx, dy])
 
     return path_2d
+
+
+def _compute_geodesic_turn_angle(
+    p0: np.ndarray,
+    p1: np.ndarray,
+    p2: np.ndarray,
+    mesh: trimesh.Trimesh
+) -> float:
+    """
+    计算路径在p1点的测地转向角度
+
+    测地转向角度是在曲面切平面上测量的转向角度。
+
+    Args:
+        p0, p1, p2: 三个连续的路径点
+        mesh: 3D网格
+
+    Returns:
+        turn_angle: 转向角度（弧度，正值为左转，负值为右转）
+    """
+    # 前一段和当前段的方向
+    prev_segment = p1 - p0
+    curr_segment = p2 - p1
+
+    prev_length = np.linalg.norm(prev_segment)
+    curr_length = np.linalg.norm(curr_segment)
+
+    if prev_length < 1e-10 or curr_length < 1e-10:
+        return 0.0
+
+    prev_dir = prev_segment / prev_length
+    curr_dir = curr_segment / curr_length
+
+    # 获取p1点的表面法向量
+    try:
+        _, _, face_idx = mesh.nearest.on_surface([p1])
+        face = mesh.faces[int(face_idx[0])]
+        v0, v1, v2 = mesh.vertices[face]
+        e1 = v1 - v0
+        e2 = v2 - v0
+        normal = np.cross(e1, e2)
+        normal = normal / (np.linalg.norm(normal) + 1e-10)
+    except:
+        # 回退：使用三点平面的法向量
+        normal = np.cross(prev_segment, curr_segment)
+        normal_len = np.linalg.norm(normal)
+        if normal_len > 1e-10:
+            normal = normal / normal_len
+        else:
+            return 0.0
+
+    # 将方向向量投影到切平面
+    prev_proj = prev_dir - np.dot(prev_dir, normal) * normal
+    curr_proj = curr_dir - np.dot(curr_dir, normal) * normal
+
+    prev_proj_len = np.linalg.norm(prev_proj)
+    curr_proj_len = np.linalg.norm(curr_proj)
+
+    if prev_proj_len < 1e-10 or curr_proj_len < 1e-10:
+        return 0.0
+
+    prev_proj = prev_proj / prev_proj_len
+    curr_proj = curr_proj / curr_proj_len
+
+    # 计算转向角度
+    cos_angle = np.clip(np.dot(prev_proj, curr_proj), -1, 1)
+
+    # 使用叉积确定转向方向
+    cross = np.cross(prev_proj, curr_proj)
+    sin_angle = np.dot(cross, normal)
+
+    turn_angle = np.arctan2(sin_angle, cos_angle)
+
+    return turn_angle
 
 
 def _generate_radial_uv_for_animation(
@@ -1357,9 +1386,21 @@ def flatten_paths_with_arc_length(
         all_points.extend(path_2d.tolist())
 
         # IR点的2D位置
-        ir_info = ir_points.get(point_id)
-        if ir_info and len(path_2d) > 0:
-            ir_points_2d[point_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
+        if point_id == "serial":
+            # 串联模式：为每个IR点找到路径上最近的点
+            for ir_id, (ir_pos_3d, ir_name, ir_is_center) in ir_points.items():
+                if ir_is_center:
+                    continue
+                # 找到3D路径上离IR点最近的点
+                distances = np.linalg.norm(path_3d - ir_pos_3d, axis=1)
+                nearest_idx = np.argmin(distances)
+                # 使用对应的2D坐标
+                ir_points_2d[ir_id] = (path_2d[nearest_idx].copy(), ir_name, ir_is_center)
+        else:
+            # 星形模式：路径ID就是IR点ID
+            ir_info = ir_points.get(point_id)
+            if ir_info and len(path_2d) > 0:
+                ir_points_2d[point_id] = (path_2d[0].copy(), ir_info[1], ir_info[2])
 
     # 添加中心点
     for point_id, (pos, name, is_center) in ir_points.items():
@@ -1624,6 +1665,10 @@ def generate_fpc_layout(
                 groove_outlines[point_id] = outline
                 all_outline_points.extend(outline.tolist())
 
+    # 检查是否为串联模式（只有一个 "serial" 路径）
+    is_serial_mode = len(flatten_result.paths_2d) == 1 and "serial" in flatten_result.paths_2d
+    serial_path_2d = flatten_result.paths_2d.get("serial") if is_serial_mode else None
+
     # 生成IR点焊盘
     for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
         if is_center:
@@ -1636,14 +1681,26 @@ def generate_fpc_layout(
             else:
                 pad_l, pad_w = rectangular_pad_length, rectangular_pad_width
 
-            # 计算路径方向（从IR点到中心点）
+            # 计算路径方向
             path_2d = flatten_result.paths_2d.get(point_id)
             if path_2d is not None and len(path_2d) >= 2:
-                # 路径方向：从第一个点（IR点）到第二个点
+                # 星形模式：路径方向从第一个点（IR点）到第二个点
                 direction = path_2d[1] - path_2d[0]
+            elif is_serial_mode and serial_path_2d is not None and len(serial_path_2d) >= 2:
+                # 串联模式：找到路径上最近的点，计算方向
+                distances = np.linalg.norm(serial_path_2d - pos, axis=1)
+                nearest_idx = np.argmin(distances)
+                if nearest_idx > 0:
+                    direction = serial_path_2d[nearest_idx] - serial_path_2d[nearest_idx - 1]
+                elif nearest_idx < len(serial_path_2d) - 1:
+                    direction = serial_path_2d[nearest_idx + 1] - serial_path_2d[nearest_idx]
+                else:
+                    direction = np.array([1.0, 0.0])
             else:
-                # 默认方向：指向中心点
+                # 默认方向：指向中心点，或默认向右
                 direction = flatten_result.center_2d - pos
+                if np.linalg.norm(direction) < 1e-6:
+                    direction = np.array([1.0, 0.0])
 
             # 生成带方向的方形焊盘
             rect_pad = create_oriented_rectangular_pad(
@@ -1660,41 +1717,47 @@ def generate_fpc_layout(
             ir_pads[point_id] = pad
             all_outline_points.extend(pad.tolist())
 
-    # 生成中心焊盘
-    if rectangular_pad_enabled:
-        # 中心点也使用方形焊盘
-        # 获取中心点的焊盘尺寸
-        center_point_id = None
-        for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
-            if is_center:
-                center_point_id = point_id
-                break
+    # 生成中心焊盘（仅在星形模式下，即有中心点标记时）
+    center_pad = None
+    has_center_point = any(is_center for _, (_, _, is_center) in flatten_result.ir_points_2d.items())
 
-        if point_pad_sizes and center_point_id and center_point_id in point_pad_sizes:
-            center_pad_l, center_pad_w = point_pad_sizes[center_point_id]
+    if has_center_point:
+        if rectangular_pad_enabled:
+            # 中心点也使用方形焊盘
+            # 获取中心点的焊盘尺寸
+            center_point_id = None
+            for point_id, (pos, name, is_center) in flatten_result.ir_points_2d.items():
+                if is_center:
+                    center_point_id = point_id
+                    break
+
+            if point_pad_sizes and center_point_id and center_point_id in point_pad_sizes:
+                center_pad_l, center_pad_w = point_pad_sizes[center_point_id]
+            else:
+                # 默认中心点焊盘尺寸（稍大一些）
+                center_pad_l = rectangular_pad_length * 1.5
+                center_pad_w = rectangular_pad_width * 1.5
+
+            # 中心点的方向：使用第一条路径的方向作为参考，或默认向右
+            center_direction = np.array([1.0, 0.0])
+            if flatten_result.paths_2d:
+                first_path = list(flatten_result.paths_2d.values())[0]
+                if len(first_path) >= 2:
+                    # 方向从中心点向外
+                    center_direction = first_path[-2] - first_path[-1]
+
+            center_pad = create_oriented_rectangular_pad(
+                flatten_result.center_2d, center_pad_l, center_pad_w, center_direction
+            )
         else:
-            # 默认中心点焊盘尺寸（稍大一些）
-            center_pad_l = rectangular_pad_length * 1.5
-            center_pad_w = rectangular_pad_width * 1.5
+            center_pad = create_circular_pad(flatten_result.center_2d, center_pad_radius)
 
-        # 中心点的方向：使用第一条路径的方向作为参考，或默认向右
-        center_direction = np.array([1.0, 0.0])
-        if flatten_result.paths_2d:
-            first_path = list(flatten_result.paths_2d.values())[0]
-            if len(first_path) >= 2:
-                # 方向从中心点向外
-                center_direction = first_path[-2] - first_path[-1]
-
-        center_pad = create_oriented_rectangular_pad(
-            flatten_result.center_2d, center_pad_l, center_pad_w, center_direction
-        )
-    else:
-        center_pad = create_circular_pad(flatten_result.center_2d, center_pad_radius)
-
-    all_outline_points.extend(center_pad.tolist())
+        all_outline_points.extend(center_pad.tolist())
 
     # 合并所有轮廓
-    all_outlines = list(groove_outlines.values()) + list(ir_pads.values()) + [center_pad]
+    all_outlines = list(groove_outlines.values()) + list(ir_pads.values())
+    if center_pad is not None:
+        all_outlines.append(center_pad)
     merged_outline = merge_overlapping_outlines(all_outlines)
 
     # 计算边界

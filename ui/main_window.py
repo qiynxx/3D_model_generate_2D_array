@@ -14,7 +14,7 @@ import trimesh
 
 from .viewer_3d import Viewer3D
 from .view_2d import View2D
-from .point_panel import PointPanel
+from .point_panel import PointPanel, PathMode
 from .param_panel import ParamPanel
 from .coord_panel import CoordPanel
 from core.mesh_loader import MeshLoader
@@ -51,6 +51,9 @@ class MainWindow(QMainWindow):
         self.animation_timer = None
         self.animation_progress = 0.0
         self.animation_actor = None
+
+        # 路径模式
+        self.path_mode = PathMode.STAR.value  # 默认星形连接
 
         self._setup_ui()
         self._setup_menu()
@@ -207,6 +210,8 @@ class MainWindow(QMainWindow):
         self.point_panel.paths_requested.connect(self._on_generate_paths)
         self.point_panel.point_selected.connect(self._on_ir_point_selected_panel)
         self.point_panel.pad_size_changed.connect(self._on_pad_size_changed)
+        self.point_panel.path_mode_changed.connect(self._on_path_mode_changed)
+        self.point_panel.serial_order_changed.connect(self._on_serial_order_changed)
 
         # 坐标系统面板
         self.coord_panel.origin_changed.connect(self._on_origin_changed)
@@ -307,6 +312,9 @@ class MainWindow(QMainWindow):
         # 同步到坐标面板
         self._sync_points_to_coord_panel()
 
+        # 更新串联排序列表
+        self._update_serial_order_list()
+
         self.status_bar.showMessage(f"添加点: {point.name}")
 
     def _on_point_deleted(self, point_id: str):
@@ -316,6 +324,9 @@ class MainWindow(QMainWindow):
 
         self.point_panel.remove_point(point_id)
         self.viewer_3d.remove_ir_point(point_id)
+
+        # 更新串联排序列表
+        self._update_serial_order_list()
 
     def _on_center_changed(self, point_id: str):
         """中心点变更"""
@@ -331,6 +342,9 @@ class MainWindow(QMainWindow):
                 name=info['name']
             )
 
+        # 更新串联排序列表（中心点不在列表中）
+        self._update_serial_order_list()
+
     def _on_pad_size_changed(self, point_id: str, length: float, width: float):
         """焊盘尺寸变更"""
         if self.path_manager and point_id in self.path_manager.ir_points:
@@ -338,15 +352,55 @@ class MainWindow(QMainWindow):
             self.path_manager.ir_points[point_id].pad_width = width
             self.status_bar.showMessage(f"点 {point_id[:8]} 焊盘尺寸: {length}x{width}mm")
 
+    def _on_path_mode_changed(self, mode: str):
+        """路径模式变更"""
+        self.path_mode = mode
+        mode_name = "星形连接" if mode == PathMode.STAR.value else "串联连接"
+        self.status_bar.showMessage(f"路径模式: {mode_name}")
+
+        # 切换到串联模式时更新排序列表
+        if mode == PathMode.SERIAL.value:
+            self._update_serial_order_list()
+
+    def _on_serial_order_changed(self, order: list):
+        """串联顺序变更"""
+        if self.path_manager:
+            self.path_manager.set_serial_order(order)
+            self.status_bar.showMessage("串联顺序已更新")
+
+    def _update_serial_order_list(self):
+        """更新串联排序列表"""
+        if self.path_manager is None:
+            return
+
+        # 串联模式下收集所有IR点（不需要中心点概念）
+        points = []
+        for point_id, point in self.path_manager.ir_points.items():
+            points.append((point_id, point.name))
+
+        # 获取当前顺序
+        current_order = self.path_manager.get_serial_order()
+
+        if current_order:
+            # 使用保存的顺序
+            self.point_panel.set_serial_order(current_order, points)
+        else:
+            # 使用默认顺序
+            self.point_panel.update_serial_order_list(points)
+
     def _on_generate_paths(self):
         """生成路径"""
         if self.path_manager is None:
             return
 
-        self.status_bar.showMessage("正在计算路径...")
-        print(f"\n=== 开始生成路径 ===")
+        # 获取当前路径模式
+        path_mode = self.point_panel.get_path_mode()
+        mode_name = "星形连接" if path_mode == PathMode.STAR.value else "串联连接"
+
+        self.status_bar.showMessage(f"正在计算路径 ({mode_name})...")
+        print(f"\n=== 开始生成路径 ({mode_name}) ===")
         print(f"IR点数量: {len(self.path_manager.ir_points)}")
-        print(f"中心点ID: {self.path_manager.center_point_id}")
+        print(f"路径终点ID: {self.path_manager.center_point_id}")
 
         # 清除旧路径
         self.viewer_3d.clear_paths()
@@ -358,8 +412,18 @@ class MainWindow(QMainWindow):
             exclude_ids.append(origin_point_id)
             print(f"排除坐标原点: {origin_point_id}")
 
-        # 计算路径（启用平滑，排除原点）
-        paths = self.path_manager.compute_all_paths(smooth=True, exclude_point_ids=exclude_ids)
+        # 根据模式计算路径
+        if path_mode == PathMode.SERIAL.value:
+            # 串联模式：一根线连接所有点
+            # 先从point_panel获取串联顺序并设置到path_manager
+            serial_order = self.point_panel.get_serial_order()
+            if serial_order:
+                self.path_manager.set_serial_order(serial_order)
+                print(f"使用串联顺序: {len(serial_order)} 个点")
+            paths = self.path_manager.compute_serial_path(smooth=True, exclude_point_ids=exclude_ids)
+        else:
+            # 星形模式：从路径终点到各IR点
+            paths = self.path_manager.compute_all_paths(smooth=True, exclude_point_ids=exclude_ids)
 
         print(f"生成路径数量: {len(paths)}")
         print(f"平滑路径数量: {len(self.path_manager.smooth_paths)}")
@@ -397,6 +461,10 @@ class MainWindow(QMainWindow):
 
         # 获取参数
         params = self.param_panel.get_groove_params()
+        path_mode = self.point_panel.get_path_mode()
+        is_serial_mode = path_mode == PathMode.SERIAL.value
+
+        print(f"路径模式: {'串联' if is_serial_mode else '星形'}")
         print(f"凹槽参数: 宽度={params.width}, 深度={params.depth}, 曲面贴合={params.conform_to_surface}")
         print(f"方形焊盘: 启用={params.pad_enabled}, 长={params.pad_length}, 宽={params.pad_width}")
         print(f"向外延伸: {params.extension_height}mm")
@@ -422,59 +490,109 @@ class MainWindow(QMainWindow):
         groove_count = 0
         pad_count = 0
 
-        for point_id in self.path_manager.smooth_paths.keys():
-            # 获取IR点信息
-            ir_point_data = self.path_manager.ir_points.get(point_id)
-            if ir_point_data is None:
-                print(f"点 {point_id}: 无法获取IR点信息，跳过")
-                continue
+        if is_serial_mode:
+            # 串联模式：一条路径，多个焊盘（不需要中心点）
+            serial_path = self.path_manager.get_smooth_path("serial")
+            if serial_path is None or len(serial_path) < 2:
+                print(f"警告: 串联路径不可用 (serial_path={serial_path is not None})")
+                QMessageBox.warning(self, "警告", "请先生成连接路径")
+                return
 
-            # 使用平滑路径
-            smooth_path = self.path_manager.get_smooth_path(point_id)
-            if smooth_path is None:
-                print(f"路径 {point_id}: smooth_path 为 None，跳过")
-                continue
+            # 计算路径法向量
+            normals = self._compute_path_normals(serial_path)
+            print(f"串联路径: {len(serial_path)} 点, 法向量 {len(normals)} 个")
 
-            if len(smooth_path) < 2:
-                print(f"路径 {point_id}: 点数不足 ({len(smooth_path)})，跳过")
-                continue
-
-            # 计算平滑路径的法向量
-            normals = self._compute_path_normals(smooth_path)
-            print(f"路径 {point_id}: {len(smooth_path)} 点, 法向量 {len(normals)} 个")
-
-            # IR点位置和法向量
-            ir_position = ir_point_data.position
-            ir_normal = normals[0] if len(normals) > 0 else np.array([0, 0, 1])
-
-            # 生成完整凹槽（方形焊盘 + 路径）
-            # 使用每个点的单独焊盘尺寸
-            point_pad_length = ir_point_data.pad_length
-            point_pad_width = ir_point_data.pad_width
-
-            pad_mesh, path_mesh = self.groove_generator.generate_complete_groove(
-                ir_position, ir_normal,
-                smooth_path, normals,
-                pad_length=point_pad_length,
-                pad_width=point_pad_width
-            )
-
-            # 添加方形焊盘
-            if pad_mesh is not None and len(pad_mesh.vertices) > 0:
-                print(f"方形焊盘 {point_id}: {len(pad_mesh.vertices)} 顶点")
-                self.viewer_3d.add_groove_preview(pad_mesh, f"{point_id}_pad")
-                all_grooves.append(pad_mesh)
-                pad_count += 1
-
-            # 添加路径凹槽
+            # 生成路径凹槽（不包含焊盘，只生成路径部分）
+            path_mesh = self.groove_generator.generate_groove_profile(serial_path, normals)
             if path_mesh is not None and len(path_mesh.vertices) > 0:
-                print(f"路径凹槽 {point_id}: {len(path_mesh.vertices)} 顶点")
-                self.viewer_3d.add_groove_preview(path_mesh, f"{point_id}_path")
+                print(f"串联路径凹槽: {len(path_mesh.vertices)} 顶点")
+                self.viewer_3d.add_groove_preview(path_mesh, "serial_path")
                 all_grooves.append(path_mesh)
                 groove_count += 1
 
-        # 生成中心点焊盘凹槽
-        if params.pad_enabled and self.path_manager.center_point_id:
+            # 为每个IR点生成焊盘（串联模式没有中心点，所有点都生成焊盘）
+            if params.pad_enabled:
+                for point_id, ir_point in self.path_manager.ir_points.items():
+                    ir_position = ir_point.position
+                    # 找到路径上离该IR点最近的点，确定方向
+                    distances = np.linalg.norm(serial_path - ir_position, axis=1)
+                    nearest_idx = np.argmin(distances)
+
+                    # 计算焊盘方向
+                    if nearest_idx > 0:
+                        pad_direction = serial_path[nearest_idx] - serial_path[nearest_idx - 1]
+                    elif nearest_idx < len(serial_path) - 1:
+                        pad_direction = serial_path[nearest_idx + 1] - serial_path[nearest_idx]
+                    else:
+                        pad_direction = np.array([1.0, 0.0, 0.0])
+
+                    ir_normal = normals[nearest_idx] if nearest_idx < len(normals) else np.array([0, 0, 1])
+
+                    pad_mesh = self.groove_generator.generate_pad_groove(
+                        ir_position, ir_normal, pad_direction,
+                        ir_point.pad_length, ir_point.pad_width, params.depth
+                    )
+
+                    if pad_mesh is not None and len(pad_mesh.vertices) > 0:
+                        print(f"焊盘 {ir_point.name}: {len(pad_mesh.vertices)} 顶点")
+                        self.viewer_3d.add_groove_preview(pad_mesh, f"{point_id}_pad")
+                        all_grooves.append(pad_mesh)
+                        pad_count += 1
+        else:
+            # 星形模式：多条路径，每条路径一个焊盘
+            for point_id in self.path_manager.smooth_paths.keys():
+                # 获取IR点信息
+                ir_point_data = self.path_manager.ir_points.get(point_id)
+                if ir_point_data is None:
+                    print(f"点 {point_id}: 无法获取IR点信息，跳过")
+                    continue
+
+                # 使用平滑路径
+                smooth_path = self.path_manager.get_smooth_path(point_id)
+                if smooth_path is None:
+                    print(f"路径 {point_id}: smooth_path 为 None，跳过")
+                    continue
+
+                if len(smooth_path) < 2:
+                    print(f"路径 {point_id}: 点数不足 ({len(smooth_path)})，跳过")
+                    continue
+
+                # 计算平滑路径的法向量
+                normals = self._compute_path_normals(smooth_path)
+                print(f"路径 {point_id}: {len(smooth_path)} 点, 法向量 {len(normals)} 个")
+
+                # IR点位置和法向量
+                ir_position = ir_point_data.position
+                ir_normal = normals[0] if len(normals) > 0 else np.array([0, 0, 1])
+
+                # 生成完整凹槽（方形焊盘 + 路径）
+                # 使用每个点的单独焊盘尺寸
+                point_pad_length = ir_point_data.pad_length
+                point_pad_width = ir_point_data.pad_width
+
+                pad_mesh, path_mesh = self.groove_generator.generate_complete_groove(
+                    ir_position, ir_normal,
+                    smooth_path, normals,
+                    pad_length=point_pad_length,
+                    pad_width=point_pad_width
+                )
+
+                # 添加方形焊盘
+                if pad_mesh is not None and len(pad_mesh.vertices) > 0:
+                    print(f"方形焊盘 {point_id}: {len(pad_mesh.vertices)} 顶点")
+                    self.viewer_3d.add_groove_preview(pad_mesh, f"{point_id}_pad")
+                    all_grooves.append(pad_mesh)
+                    pad_count += 1
+
+                # 添加路径凹槽
+                if path_mesh is not None and len(path_mesh.vertices) > 0:
+                    print(f"路径凹槽 {point_id}: {len(path_mesh.vertices)} 顶点")
+                    self.viewer_3d.add_groove_preview(path_mesh, f"{point_id}_path")
+                    all_grooves.append(path_mesh)
+                    groove_count += 1
+
+        # 生成路径终点焊盘凹槽（仅星形模式需要）
+        if not is_serial_mode and params.pad_enabled and self.path_manager.center_point_id:
             center_point = self.path_manager.ir_points.get(self.path_manager.center_point_id)
             if center_point:
                 print(f"\n生成中心点焊盘凹槽...")
@@ -646,6 +764,10 @@ class MainWindow(QMainWindow):
             center_position = None
             center_normal = None
 
+            # 获取当前路径模式
+            path_mode = self.point_panel.get_path_mode()
+            is_serial_mode = path_mode == PathMode.SERIAL.value
+
             for point_id, point in self.path_manager.ir_points.items():
                 ir_points[point_id] = (point.position, point.name, point.is_center)
                 if point.is_center:
@@ -655,8 +777,20 @@ class MainWindow(QMainWindow):
                     nearest_idx = np.argmin(distances)
                     center_normal = self.mesh.vertex_normals[nearest_idx]
 
+            # 串联模式下没有中心点，使用路径的第一个点作为参考
             if center_position is None:
-                QMessageBox.warning(self, "警告", "未找到中心点")
+                if is_serial_mode and "serial" in paths_3d:
+                    # 使用串联路径的第一个点作为参考
+                    serial_path = paths_3d["serial"]
+                    if len(serial_path) > 0:
+                        center_position = serial_path[0]
+                        distances = np.linalg.norm(self.mesh.vertices - center_position, axis=1)
+                        nearest_idx = np.argmin(distances)
+                        center_normal = self.mesh.vertex_normals[nearest_idx]
+                        print(f"串联模式: 使用路径起点作为参考点")
+
+            if center_position is None:
+                QMessageBox.warning(self, "警告", "未找到参考点，请先生成连接路径")
                 return
 
             # 使用保形映射展开（传入mesh以启用LSCM算法）
@@ -1086,6 +1220,12 @@ class MainWindow(QMainWindow):
                 for path_id, path in self.path_manager.smooth_paths.items():
                     paths_data[path_id] = path
 
+            # 额外数据：路径模式和串联顺序
+            additional_data = {
+                'path_mode': self.point_panel.get_path_mode(),
+                'serial_order': self.path_manager.get_serial_order() if self.path_manager else []
+            }
+
             # 保存快照
             success = ProjectSnapshot.save_snapshot(
                 filepath=filepath,
@@ -1094,7 +1234,8 @@ class MainWindow(QMainWindow):
                 groove_params=groove_params_dict,
                 fpc_params=fpc_params_dict,
                 coord_system=coord_system,
-                paths_data=paths_data
+                paths_data=paths_data,
+                additional_data=additional_data
             )
 
             if success:
@@ -1200,6 +1341,23 @@ class MainWindow(QMainWindow):
                 self._sync_points_to_coord_panel()
                 self.coord_panel.from_dict(data['coord_system'])
                 self._update_coordinate_axes()
+
+            # 恢复路径模式和串联顺序
+            if 'additional' in data:
+                additional = data['additional']
+
+                # 恢复路径模式
+                path_mode = additional.get('path_mode', PathMode.STAR.value)
+                self.point_panel.set_path_mode(path_mode)
+                self.path_mode = path_mode
+
+                # 恢复串联顺序
+                serial_order = additional.get('serial_order', [])
+                if self.path_manager and serial_order:
+                    self.path_manager.set_serial_order(serial_order)
+
+            # 更新串联排序列表
+            self._update_serial_order_list()
 
             self.status_bar.showMessage(f"项目快照已加载: {filepath}")
 

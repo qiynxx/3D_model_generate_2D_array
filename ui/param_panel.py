@@ -2,7 +2,8 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox,
     QCheckBox, QGroupBox, QPushButton, QTabWidget, QSlider,
-    QProgressBar, QFileDialog, QMessageBox, QScrollArea, QLineEdit
+    QProgressBar, QFileDialog, QMessageBox, QScrollArea, QLineEdit,
+    QComboBox
 )
 from PyQt5.QtCore import pyqtSignal, Qt
 from dataclasses import dataclass
@@ -101,43 +102,51 @@ class ParamPanel(QWidget):
         # 内容容器
         content_widget = QWidget()
         layout = QVBoxLayout(content_widget)
+        layout.setSpacing(8)
 
-        # 宽度
+        # 宽度设置
         width_group = QGroupBox("宽度设置")
         width_layout = QVBoxLayout(width_group)
+        width_layout.setSpacing(4)
 
         # 自动宽度
-        self.auto_width_check = QCheckBox("自动调整宽度（根据汇聚线路数）")
+        self.auto_width_check = QCheckBox("自动调整宽度")
         self.auto_width_check.setChecked(True)
         self.auto_width_check.stateChanged.connect(self._on_auto_width_changed)
         width_layout.addWidget(self.auto_width_check)
 
-        # 基础宽度
-        base_width_layout = QHBoxLayout()
-        base_width_layout.addWidget(QLabel("基础宽度 (mm):"))
+        # 基础宽度 - 使用滑块
+        self.width_label = QLabel("基础宽度: 1.0 mm")
+        width_layout.addWidget(self.width_label)
+        self.width_slider = QSlider(Qt.Horizontal)
+        self.width_slider.setRange(1, 100)  # 0.1 - 10.0 mm
+        self.width_slider.setValue(10)
+        self.width_slider.valueChanged.connect(self._on_width_slider_changed)
+        width_layout.addWidget(self.width_slider)
+        # 保留隐藏的spin用于存储值
         self.width_spin = QDoubleSpinBox()
         self.width_spin.setRange(0.1, 10.0)
         self.width_spin.setValue(1.0)
-        self.width_spin.setSingleStep(0.1)
-        self.width_spin.valueChanged.connect(self._on_params_changed)
-        base_width_layout.addWidget(self.width_spin)
-        width_layout.addLayout(base_width_layout)
+        self.width_spin.setVisible(False)
 
-        # 最小/最大宽度
+        # 宽度范围 - 紧凑布局
         range_layout = QHBoxLayout()
         range_layout.addWidget(QLabel("范围:"))
         self.min_width_spin = QDoubleSpinBox()
         self.min_width_spin.setRange(0.1, 5.0)
         self.min_width_spin.setValue(0.5)
+        self.min_width_spin.setFixedWidth(60)
         self.min_width_spin.valueChanged.connect(self._on_params_changed)
         range_layout.addWidget(self.min_width_spin)
         range_layout.addWidget(QLabel("-"))
         self.max_width_spin = QDoubleSpinBox()
         self.max_width_spin.setRange(0.5, 20.0)
         self.max_width_spin.setValue(5.0)
+        self.max_width_spin.setFixedWidth(60)
         self.max_width_spin.valueChanged.connect(self._on_params_changed)
         range_layout.addWidget(self.max_width_spin)
         range_layout.addWidget(QLabel("mm"))
+        range_layout.addStretch()
         width_layout.addLayout(range_layout)
 
         layout.addWidget(width_group)
@@ -145,109 +154,79 @@ class ParamPanel(QWidget):
         # 深度设置
         depth_group = QGroupBox("深度设置")
         depth_layout = QVBoxLayout(depth_group)
+        depth_layout.setSpacing(4)
 
-        # 凹槽深度
-        depth_spin_layout = QHBoxLayout()
-        depth_spin_layout.addWidget(QLabel("凹槽深度 (mm):"))
+        # 凹槽深度 - 滑块
+        self.depth_label = QLabel("凹槽深度: 0.5 mm")
+        depth_layout.addWidget(self.depth_label)
+        self.depth_slider = QSlider(Qt.Horizontal)
+        self.depth_slider.setRange(1, 50)  # 0.1 - 5.0 mm
+        self.depth_slider.setValue(5)
+        self.depth_slider.valueChanged.connect(self._on_depth_slider_changed)
+        depth_layout.addWidget(self.depth_slider)
+        # 保留隐藏的spin
         self.depth_spin = QDoubleSpinBox()
         self.depth_spin.setRange(0.1, 5.0)
         self.depth_spin.setValue(0.5)
-        self.depth_spin.setSingleStep(0.1)
-        self.depth_spin.valueChanged.connect(self._on_params_changed)
-        depth_spin_layout.addWidget(self.depth_spin)
-        depth_layout.addLayout(depth_spin_layout)
+        self.depth_spin.setVisible(False)
 
-        # 深度滑块
-        self.depth_slider = QSlider(Qt.Horizontal)
-        self.depth_slider.setRange(1, 50)
-        self.depth_slider.setValue(5)
-        self.depth_slider.valueChanged.connect(
-            lambda v: self.depth_spin.setValue(v / 10)
-        )
-        depth_layout.addWidget(self.depth_slider)
-
-        # 向外延伸高度
-        ext_height_layout = QHBoxLayout()
-        ext_height_layout.addWidget(QLabel("向外延伸 (mm):"))
+        # 向外延伸 - 滑块
+        self.ext_height_label = QLabel("向外延伸: 0.5 mm")
+        depth_layout.addWidget(self.ext_height_label)
+        self.ext_height_slider = QSlider(Qt.Horizontal)
+        self.ext_height_slider.setRange(1, 50)  # 0.01 - 5.0 mm
+        self.ext_height_slider.setValue(5)
+        self.ext_height_slider.valueChanged.connect(self._on_ext_height_slider_changed)
+        depth_layout.addWidget(self.ext_height_slider)
+        # 保留隐藏的spin
         self.ext_height_spin = QDoubleSpinBox()
         self.ext_height_spin.setRange(0.01, 5.0)
         self.ext_height_spin.setValue(0.5)
-        self.ext_height_spin.setSingleStep(0.1)
-        self.ext_height_spin.setToolTip(
-            "凹槽向表面外延伸的高度，\n"
-            "用于确保布尔运算能完全切穿表面"
-        )
-        self.ext_height_spin.valueChanged.connect(self._on_params_changed)
-        ext_height_layout.addWidget(self.ext_height_spin)
-        depth_layout.addLayout(ext_height_layout)
-
-        ext_info = QLabel("确保凹槽切穿表面的延伸量")
-        ext_info.setStyleSheet("color: gray; font-size: 10px;")
-        depth_layout.addWidget(ext_info)
+        self.ext_height_spin.setVisible(False)
 
         layout.addWidget(depth_group)
 
         # 曲面贴合设置
-        conform_group = QGroupBox("曲面贴合")
-        conform_layout = QVBoxLayout(conform_group)
-
         self.conform_surface_check = QCheckBox("启用曲面贴合模式")
         self.conform_surface_check.setChecked(True)
-        self.conform_surface_check.setToolTip(
-            "启用后，凹槽边界将精确贴合曲面，\n"
-            "FPC可以完美嵌入凹槽中。\n"
-            "禁用则使用简单的平面凹槽。"
-        )
+        self.conform_surface_check.setToolTip("凹槽边界精确贴合曲面")
         self.conform_surface_check.stateChanged.connect(self._on_params_changed)
-        conform_layout.addWidget(self.conform_surface_check)
-
-        conform_info = QLabel("凹槽边界将精确贴合3D曲面")
-        conform_info.setStyleSheet("color: gray; font-size: 10px;")
-        conform_layout.addWidget(conform_info)
-
-        layout.addWidget(conform_group)
+        layout.addWidget(self.conform_surface_check)
 
         # 方形焊盘设置
         pad_group = QGroupBox("方形焊盘凹槽")
         pad_layout = QVBoxLayout(pad_group)
+        pad_layout.setSpacing(4)
 
-        # 启用方形焊盘
-        self.pad_enabled_check = QCheckBox("在IR点位置生成方形凹槽")
+        self.pad_enabled_check = QCheckBox("生成方形焊盘凹槽")
         self.pad_enabled_check.setChecked(True)
-        self.pad_enabled_check.setToolTip(
-            "启用后，在每个IR点位置生成方形凹槽，\n"
-            "路径凹槽将垂直连接到方形边缘。"
-        )
         self.pad_enabled_check.stateChanged.connect(self._on_pad_enabled_changed)
         pad_layout.addWidget(self.pad_enabled_check)
 
-        # 方形长度（沿路径方向）
-        pad_length_layout = QHBoxLayout()
-        pad_length_layout.addWidget(QLabel("长度 (mm):"))
+        # 焊盘尺寸 - 滑块
+        self.pad_length_label = QLabel("长度: 3.0 mm")
+        pad_layout.addWidget(self.pad_length_label)
+        self.pad_length_slider = QSlider(Qt.Horizontal)
+        self.pad_length_slider.setRange(10, 200)  # 1.0 - 20.0 mm
+        self.pad_length_slider.setValue(30)
+        self.pad_length_slider.valueChanged.connect(self._on_pad_length_slider_changed)
+        pad_layout.addWidget(self.pad_length_slider)
         self.pad_length_spin = QDoubleSpinBox()
         self.pad_length_spin.setRange(1.0, 20.0)
         self.pad_length_spin.setValue(3.0)
-        self.pad_length_spin.setSingleStep(0.5)
-        self.pad_length_spin.setToolTip("方形凹槽沿路径方向的长度")
-        self.pad_length_spin.valueChanged.connect(self._on_params_changed)
-        pad_length_layout.addWidget(self.pad_length_spin)
-        pad_layout.addLayout(pad_length_layout)
+        self.pad_length_spin.setVisible(False)
 
-        # 方形宽度（垂直于路径）
-        pad_width_layout = QHBoxLayout()
-        pad_width_layout.addWidget(QLabel("宽度 (mm):"))
+        self.pad_width_label = QLabel("宽度: 2.0 mm")
+        pad_layout.addWidget(self.pad_width_label)
+        self.pad_width_slider = QSlider(Qt.Horizontal)
+        self.pad_width_slider.setRange(10, 200)  # 1.0 - 20.0 mm
+        self.pad_width_slider.setValue(20)
+        self.pad_width_slider.valueChanged.connect(self._on_pad_width_slider_changed)
+        pad_layout.addWidget(self.pad_width_slider)
         self.pad_width_spin = QDoubleSpinBox()
         self.pad_width_spin.setRange(1.0, 20.0)
         self.pad_width_spin.setValue(2.0)
-        self.pad_width_spin.setSingleStep(0.5)
-        self.pad_width_spin.setToolTip("方形凹槽垂直于路径的宽度")
-        self.pad_width_spin.valueChanged.connect(self._on_params_changed)
-        pad_width_layout.addWidget(self.pad_width_spin)
-        pad_layout.addLayout(pad_width_layout)
-
-        pad_info = QLabel("路径与方形边缘垂直连接")
-        pad_info.setStyleSheet("color: gray; font-size: 10px;")
-        pad_layout.addWidget(pad_info)
+        self.pad_width_spin.setVisible(False)
 
         layout.addWidget(pad_group)
 
@@ -275,10 +254,78 @@ class ParamPanel(QWidget):
         scroll_area.setWidget(content_widget)
         return scroll_area
 
+    def _on_width_slider_changed(self, value):
+        """宽度滑块变更"""
+        width = value / 10.0
+        self.width_spin.setValue(width)
+        self.width_label.setText(f"基础宽度: {width:.1f} mm")
+        self._on_params_changed()
+
+    def _on_depth_slider_changed(self, value):
+        """深度滑块变更"""
+        depth = value / 10.0
+        self.depth_spin.setValue(depth)
+        self.depth_label.setText(f"凹槽深度: {depth:.1f} mm")
+        self._on_params_changed()
+
+    def _on_ext_height_slider_changed(self, value):
+        """延伸高度滑块变更"""
+        height = value / 10.0
+        self.ext_height_spin.setValue(height)
+        self.ext_height_label.setText(f"向外延伸: {height:.1f} mm")
+        self._on_params_changed()
+
+    def _on_pad_length_slider_changed(self, value):
+        """焊盘长度滑块变更"""
+        length = value / 10.0
+        self.pad_length_spin.setValue(length)
+        self.pad_length_label.setText(f"长度: {length:.1f} mm")
+        self._on_params_changed()
+
+    def _on_pad_width_slider_changed(self, value):
+        """焊盘宽度滑块变更"""
+        width = value / 10.0
+        self.pad_width_spin.setValue(width)
+        self.pad_width_label.setText(f"宽度: {width:.1f} mm")
+        self._on_params_changed()
+
+    def _on_scale_slider_changed(self, value):
+        """输出比例滑块变更"""
+        scale = value / 10.0
+        self.scale_spin.setValue(scale)
+        self.scale_label.setText(f"输出比例: {scale:.1f} : 1")
+
+    def _on_fpc_width_slider_changed(self, value):
+        """FPC走线宽度滑块变更"""
+        width = value / 10.0
+        self.fpc_width_spin.setValue(width)
+        self.fpc_width_label.setText(f"走线宽度: {width:.1f} mm")
+        self._on_fpc_params_changed()
+
+    def _on_pad_radius_slider_changed(self, value):
+        """IR焊盘半径滑块变更"""
+        radius = value / 10.0
+        self.pad_radius_spin.setValue(radius)
+        self.pad_radius_label.setText(f"IR焊盘半径: {radius:.1f} mm")
+        self._on_fpc_params_changed()
+
+    def _on_center_pad_slider_changed(self, value):
+        """中心焊盘半径滑块变更"""
+        radius = value / 10.0
+        self.center_pad_spin.setValue(radius)
+        self.center_pad_label.setText(f"中心焊盘半径: {radius:.1f} mm")
+        self._on_fpc_params_changed()
+
     def _create_flatten_tab(self) -> QWidget:
         """创建展开设置选项卡"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        # 使用滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setSpacing(8)
 
         # 展开方法
         method_group = QGroupBox("展开算法")
@@ -292,18 +339,23 @@ class ParamPanel(QWidget):
 
         layout.addWidget(method_group)
 
-        # 缩放
+        # 缩放设置 - 使用滑块
         scale_group = QGroupBox("缩放设置")
         scale_layout = QVBoxLayout(scale_group)
+        scale_layout.setSpacing(4)
 
-        scale_spin_layout = QHBoxLayout()
-        scale_spin_layout.addWidget(QLabel("输出比例:"))
+        self.scale_label = QLabel("输出比例: 1.0 : 1")
+        scale_layout.addWidget(self.scale_label)
+        self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setRange(1, 100)  # 0.1 - 10.0
+        self.scale_slider.setValue(10)
+        self.scale_slider.valueChanged.connect(self._on_scale_slider_changed)
+        scale_layout.addWidget(self.scale_slider)
+        # 隐藏的spin存储值
         self.scale_spin = QDoubleSpinBox()
-        self.scale_spin.setRange(0.1, 100.0)
+        self.scale_spin.setRange(0.1, 10.0)
         self.scale_spin.setValue(1.0)
-        self.scale_spin.setSuffix(" : 1")
-        scale_spin_layout.addWidget(self.scale_spin)
-        scale_layout.addLayout(scale_spin_layout)
+        self.scale_spin.setVisible(False)
 
         layout.addWidget(scale_group)
 
@@ -323,42 +375,52 @@ class ParamPanel(QWidget):
         self.btn_flatten.clicked.connect(lambda: self.flatten_clicked.emit())
         layout.addWidget(self.btn_flatten)
 
-        # FPC布局设置
+        # FPC布局设置 - 使用滑块
         fpc_group = QGroupBox("FPC图纸设置")
         fpc_layout = QVBoxLayout(fpc_group)
+        fpc_layout.setSpacing(4)
 
-        # 凹槽宽度（用于2D展开）
-        fpc_width_layout = QHBoxLayout()
-        fpc_width_layout.addWidget(QLabel("走线宽度 (mm):"))
+        # 走线宽度 - 滑块
+        self.fpc_width_label = QLabel("走线宽度: 1.0 mm")
+        fpc_layout.addWidget(self.fpc_width_label)
+        self.fpc_width_slider = QSlider(Qt.Horizontal)
+        self.fpc_width_slider.setRange(1, 100)  # 0.1 - 10.0 mm
+        self.fpc_width_slider.setValue(10)
+        self.fpc_width_slider.valueChanged.connect(self._on_fpc_width_slider_changed)
+        fpc_layout.addWidget(self.fpc_width_slider)
+        # 隐藏的spin
         self.fpc_width_spin = QDoubleSpinBox()
         self.fpc_width_spin.setRange(0.1, 10.0)
         self.fpc_width_spin.setValue(1.0)
-        self.fpc_width_spin.setSingleStep(0.1)
-        self.fpc_width_spin.valueChanged.connect(self._on_fpc_params_changed)
-        fpc_width_layout.addWidget(self.fpc_width_spin)
-        fpc_layout.addLayout(fpc_width_layout)
+        self.fpc_width_spin.setVisible(False)
 
-        # IR焊盘半径
-        pad_layout = QHBoxLayout()
-        pad_layout.addWidget(QLabel("IR焊盘半径 (mm):"))
+        # IR焊盘半径 - 滑块
+        self.pad_radius_label = QLabel("IR焊盘半径: 2.0 mm")
+        fpc_layout.addWidget(self.pad_radius_label)
+        self.pad_radius_slider = QSlider(Qt.Horizontal)
+        self.pad_radius_slider.setRange(5, 100)  # 0.5 - 10.0 mm
+        self.pad_radius_slider.setValue(20)
+        self.pad_radius_slider.valueChanged.connect(self._on_pad_radius_slider_changed)
+        fpc_layout.addWidget(self.pad_radius_slider)
+        # 隐藏的spin
         self.pad_radius_spin = QDoubleSpinBox()
         self.pad_radius_spin.setRange(0.5, 10.0)
         self.pad_radius_spin.setValue(2.0)
-        self.pad_radius_spin.setSingleStep(0.5)
-        self.pad_radius_spin.valueChanged.connect(self._on_fpc_params_changed)
-        pad_layout.addWidget(self.pad_radius_spin)
-        fpc_layout.addLayout(pad_layout)
+        self.pad_radius_spin.setVisible(False)
 
-        # 中心焊盘半径
-        center_pad_layout = QHBoxLayout()
-        center_pad_layout.addWidget(QLabel("中心焊盘半径 (mm):"))
+        # 中心焊盘半径 - 滑块
+        self.center_pad_label = QLabel("中心焊盘半径: 3.0 mm")
+        fpc_layout.addWidget(self.center_pad_label)
+        self.center_pad_slider = QSlider(Qt.Horizontal)
+        self.center_pad_slider.setRange(5, 150)  # 0.5 - 15.0 mm
+        self.center_pad_slider.setValue(30)
+        self.center_pad_slider.valueChanged.connect(self._on_center_pad_slider_changed)
+        fpc_layout.addWidget(self.center_pad_slider)
+        # 隐藏的spin
         self.center_pad_spin = QDoubleSpinBox()
         self.center_pad_spin.setRange(0.5, 15.0)
         self.center_pad_spin.setValue(3.0)
-        self.center_pad_spin.setSingleStep(0.5)
-        self.center_pad_spin.valueChanged.connect(self._on_fpc_params_changed)
-        center_pad_layout.addWidget(self.center_pad_spin)
-        fpc_layout.addLayout(center_pad_layout)
+        self.center_pad_spin.setVisible(False)
 
         layout.addWidget(fpc_group)
 
@@ -433,7 +495,9 @@ class ParamPanel(QWidget):
         layout.addWidget(self.distortion_label)
 
         layout.addStretch()
-        return widget
+
+        scroll_area.setWidget(content_widget)
+        return scroll_area
 
     def _create_export_tab(self) -> QWidget:
         """创建导出设置选项卡"""

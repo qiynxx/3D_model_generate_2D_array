@@ -2,11 +2,18 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QLabel, QGroupBox, QLineEdit, QComboBox, QMessageBox,
-    QDoubleSpinBox
+    QDoubleSpinBox, QAbstractItemView
 )
 from PyQt5.QtCore import pyqtSignal, Qt
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Tuple
+from enum import Enum
 import numpy as np
+
+
+class PathMode(Enum):
+    """路径生成模式"""
+    STAR = "star"       # 星形连接：中心点到各个IR点
+    SERIAL = "serial"   # 串联连接：一根线连接所有点
 
 
 class PointPanel(QWidget):
@@ -20,6 +27,8 @@ class PointPanel(QWidget):
     paths_requested = pyqtSignal()  # 请求生成路径
     group_changed = pyqtSignal(str, str)  # (point_id, group_name)
     pad_size_changed = pyqtSignal(str, float, float)  # (point_id, length, width)
+    path_mode_changed = pyqtSignal(str)  # 路径模式变更
+    serial_order_changed = pyqtSignal(list)  # 串联顺序变更
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -27,6 +36,7 @@ class PointPanel(QWidget):
         self.points: Dict[str, dict] = {}  # id -> point_info
         self.current_center_id: Optional[str] = None
         self.origin_point_id: Optional[str] = None  # 坐标原点ID
+        self.current_path_mode: str = PathMode.STAR.value  # 当前路径模式
 
         self._setup_ui()
 
@@ -85,11 +95,6 @@ class PointPanel(QWidget):
         self.coord_label = QLabel("坐标: -")
         info_layout.addWidget(self.coord_label)
 
-        # 设为中心按钮
-        self.btn_set_center = QPushButton("设为中心连接点")
-        self.btn_set_center.clicked.connect(self._on_set_center_clicked)
-        info_layout.addWidget(self.btn_set_center)
-
         # 焊盘尺寸设置
         pad_group = QGroupBox("焊盘尺寸")
         pad_layout = QVBoxLayout(pad_group)
@@ -119,6 +124,43 @@ class PointPanel(QWidget):
         info_layout.addWidget(pad_group)
 
         layout.addWidget(info_group)
+
+        # 路径模式设置
+        path_mode_group = QGroupBox("路径模式")
+        path_mode_layout = QVBoxLayout(path_mode_group)
+
+        self.path_mode_combo = QComboBox()
+        self.path_mode_combo.addItem("星形连接 (中心点到各IR点)", PathMode.STAR.value)
+        self.path_mode_combo.addItem("串联连接 (一根线连接所有点)", PathMode.SERIAL.value)
+        self.path_mode_combo.currentIndexChanged.connect(self._on_path_mode_changed)
+        path_mode_layout.addWidget(self.path_mode_combo)
+
+        # 设为中心按钮（仅星形模式显示）
+        self.btn_set_center = QPushButton("设为中心连接点")
+        self.btn_set_center.clicked.connect(self._on_set_center_clicked)
+        path_mode_layout.addWidget(self.btn_set_center)
+
+        layout.addWidget(path_mode_group)
+
+        # 串联排序设置（仅在串联模式下显示）
+        self.serial_order_group = QGroupBox("串联顺序 (拖拽排序)")
+        serial_order_layout = QVBoxLayout(self.serial_order_group)
+
+        self.serial_order_list = QListWidget()
+        self.serial_order_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.serial_order_list.setDefaultDropAction(Qt.MoveAction)
+        self.serial_order_list.setMinimumHeight(80)
+        self.serial_order_list.setMaximumHeight(120)
+        self.serial_order_list.model().rowsMoved.connect(self._on_serial_order_changed)
+        serial_order_layout.addWidget(self.serial_order_list)
+
+        serial_hint = QLabel("拖拽调整点位连接顺序")
+        serial_hint.setStyleSheet("color: gray; font-size: 10px;")
+        serial_order_layout.addWidget(serial_hint)
+
+        # 默认隐藏，仅在串联模式下显示
+        self.serial_order_group.setVisible(False)
+        layout.addWidget(self.serial_order_group)
 
         # 生成路径按钮
         self.btn_generate = QPushButton("生成连接路径")
@@ -274,16 +316,20 @@ class PointPanel(QWidget):
     def _update_stats(self):
         """更新统计信息"""
         count = len(self.points)
-        center_name = "未设置"
-        if self.current_center_id and self.current_center_id in self.points:
-            center_name = self.points[self.current_center_id]['name']
 
         # 计算参与路径生成的点数（排除原点）
         active_count = count
         if self.origin_point_id and self.origin_point_id in self.points:
             active_count -= 1
 
-        self.stats_label.setText(f"点数: {count} (路径点: {active_count}) | 中心点: {center_name}")
+        # 根据路径模式显示不同信息
+        if self.current_path_mode == PathMode.SERIAL.value:
+            self.stats_label.setText(f"点数: {count} (路径点: {active_count}) | 模式: 串联")
+        else:
+            center_name = "未设置"
+            if self.current_center_id and self.current_center_id in self.points:
+                center_name = self.points[self.current_center_id]['name']
+            self.stats_label.setText(f"点数: {count} (路径点: {active_count}) | 中心点: {center_name}")
 
     def _on_add_clicked(self, checked: bool):
         """添加按钮点击"""
@@ -375,11 +421,35 @@ class PointPanel(QWidget):
             self.points[point_id]['pad_width'] = width
             self.pad_size_changed.emit(point_id, length, width)
 
+    def _on_path_mode_changed(self, index: int):
+        """路径模式变更"""
+        mode_value = self.path_mode_combo.itemData(index)
+        self.current_path_mode = mode_value
+
+        # 串联模式：隐藏设置中心按钮，显示排序列表
+        is_serial = (mode_value == PathMode.SERIAL.value)
+        self.btn_set_center.setVisible(not is_serial)
+        self.serial_order_group.setVisible(is_serial)
+
+        # 更新统计信息
+        self._update_stats()
+
+        # 发送信号
+        self.path_mode_changed.emit(mode_value)
+
+    def _on_serial_order_changed(self):
+        """串联顺序变更（拖拽后触发）"""
+        order = self.get_serial_order()
+        self.serial_order_changed.emit(order)
+
     def _on_generate_clicked(self):
         """生成路径按钮点击"""
-        if not self.current_center_id:
-            QMessageBox.warning(self, "警告", "请先设置中心连接点")
-            return
+        # 串联模式不需要中心点
+        if self.current_path_mode == PathMode.STAR.value:
+            if not self.current_center_id:
+                QMessageBox.warning(self, "警告", "请先设置中心连接点")
+                return
+
         if len(self.points) < 2:
             QMessageBox.warning(self, "警告", "至少需要2个点才能生成路径")
             return
@@ -415,3 +485,65 @@ class PointPanel(QWidget):
         self.origin_point_id = point_id
         self._refresh_list()
         self._update_stats()
+
+    def get_path_mode(self) -> str:
+        """获取当前路径模式"""
+        return self.current_path_mode
+
+    def set_path_mode(self, mode: str):
+        """设置路径模式"""
+        for i in range(self.path_mode_combo.count()):
+            if self.path_mode_combo.itemData(i) == mode:
+                self.path_mode_combo.setCurrentIndex(i)
+                break
+
+    def update_serial_order_list(self, points: List[Tuple[str, str]]):
+        """
+        更新串联排序列表
+
+        Args:
+            points: [(point_id, point_name), ...] 点列表
+        """
+        self.serial_order_list.clear()
+        for point_id, point_name in points:
+            item = QListWidgetItem(point_name)
+            item.setData(Qt.UserRole, point_id)
+            self.serial_order_list.addItem(item)
+
+    def get_serial_order(self) -> List[str]:
+        """获取当前串联顺序（点ID列表）"""
+        order = []
+        for i in range(self.serial_order_list.count()):
+            item = self.serial_order_list.item(i)
+            point_id = item.data(Qt.UserRole)
+            order.append(point_id)
+        return order
+
+    def set_serial_order(self, order: List[str], all_points: List[Tuple[str, str]]):
+        """
+        设置串联顺序
+
+        Args:
+            order: 点ID顺序列表
+            all_points: [(point_id, point_name), ...] 所有点列表
+        """
+        # 创建ID到名称的映射
+        id_to_name = {pid: name for pid, name in all_points}
+
+        self.serial_order_list.clear()
+
+        # 按指定顺序添加点
+        added = set()
+        for point_id in order:
+            if point_id in id_to_name and point_id not in added:
+                item = QListWidgetItem(id_to_name[point_id])
+                item.setData(Qt.UserRole, point_id)
+                self.serial_order_list.addItem(item)
+                added.add(point_id)
+
+        # 添加不在顺序中的点
+        for point_id, point_name in all_points:
+            if point_id not in added:
+                item = QListWidgetItem(point_name)
+                item.setData(Qt.UserRole, point_id)
+                self.serial_order_list.addItem(item)
