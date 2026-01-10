@@ -586,6 +586,18 @@ class ParamPanel(QWidget):
         fpc_svg_row.addWidget(self.btn_save_fpc_svg)
         drawing_layout.addLayout(fpc_svg_row)
 
+        # FPC单一轮廓DXF（无交叉线）
+        fpc_outline_row = QHBoxLayout()
+        self.export_fpc_outline = QCheckBox("FPC轮廓 (DXF)")
+        self.export_fpc_outline.setChecked(False)
+        self.export_fpc_outline.setToolTip("导出合并后的单一封闭轮廓，无交叉线")
+        fpc_outline_row.addWidget(self.export_fpc_outline)
+        self.btn_save_fpc_outline = QPushButton("单独保存")
+        self.btn_save_fpc_outline.setFixedWidth(80)
+        self.btn_save_fpc_outline.clicked.connect(lambda: self._on_single_export("fpc_outline_dxf"))
+        fpc_outline_row.addWidget(self.btn_save_fpc_outline)
+        drawing_layout.addLayout(fpc_outline_row)
+
         layout.addWidget(drawing_group)
 
         # 坐标文件
@@ -755,6 +767,7 @@ class ParamPanel(QWidget):
             'svg': self.export_svg.isChecked(),
             'fpc_dxf': self.export_fpc_dxf.isChecked(),
             'fpc_svg': self.export_fpc_svg.isChecked(),
+            'fpc_outline_dxf': self.export_fpc_outline.isChecked(),
             'world_json': self.export_world_json.isChecked(),
             'world_csv': self.export_world_csv.isChecked(),
             'local_json': self.export_local_json.isChecked(),

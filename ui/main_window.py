@@ -1813,6 +1813,7 @@ class MainWindow(QMainWindow):
                 'svg': ("SVG文件 (*.svg)", "2d_paths.svg"),
                 'fpc_dxf': ("DXF文件 (*.dxf)", "fpc_layout.dxf"),
                 'fpc_svg': ("SVG文件 (*.svg)", "fpc_layout.svg"),
+                'fpc_outline_dxf': ("DXF文件 (*.dxf)", "fpc_outline.dxf"),
                 'world_json': ("JSON文件 (*.json)", "world_coordinates.json"),
                 'world_csv': ("CSV文件 (*.csv)", "world_coordinates.csv"),
                 'local_json': ("JSON文件 (*.json)", "local_coordinates.json"),
@@ -1885,6 +1886,20 @@ class MainWindow(QMainWindow):
                         groove_outlines, ir_pads, center_pad, merged_outline,
                         ir_points_2d, filepath
                     )
+
+            elif export_type == 'fpc_outline_dxf':
+                # 导出单一封闭轮廓的FPC DXF（无交叉线）
+                if not self.view_2d.has_fpc_layout():
+                    QMessageBox.warning(self, "警告", "没有可导出的FPC布局，请先生成FPC图纸")
+                    return
+                fpc_layout = self.view_2d.get_fpc_layout_for_export()
+                groove_outlines = fpc_layout.get('groove_outlines', [])
+                ir_pads = fpc_layout.get('ir_pads', [])
+                center_pad = fpc_layout.get('center_pad')
+
+                success = exporter.export_fpc_outline_only_dxf(
+                    groove_outlines, ir_pads, center_pad, filepath
+                )
 
             elif export_type in ('world_json', 'world_csv', 'local_json', 'local_csv'):
                 if not self.point_panel.points:

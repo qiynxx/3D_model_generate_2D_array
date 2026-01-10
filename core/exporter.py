@@ -225,6 +225,149 @@ class Exporter:
             return False
 
     @staticmethod
+    def export_fpc_outline_only_dxf(
+        groove_outlines: List[np.ndarray],
+        ir_pads: List[np.ndarray],
+        center_pad: np.ndarray,
+        filepath: str,
+        scale: float = 1.0
+    ) -> bool:
+        """
+        导出FPC布局为单一封闭轮廓的DXF格式（无交叉线）
+
+        使用布尔并集将所有凹槽和焊盘合并为一个封闭轮廓
+
+        Args:
+            groove_outlines: 凹槽轮廓列表
+            ir_pads: IR点焊盘轮廓列表
+            center_pad: 中心焊盘轮廓
+            filepath: 保存路径
+            scale: 缩放因子
+
+        Returns:
+            是否成功
+        """
+        if not HAS_EZDXF:
+            print("ezdxf库未安装，无法导出DXF")
+            return False
+
+        try:
+            from shapely.geometry import Polygon
+            from shapely.ops import unary_union
+
+            # 收集所有多边形
+            all_polygons = []
+
+            # 添加凹槽轮廓
+            for outline in groove_outlines:
+                if len(outline) >= 3:
+                    try:
+                        poly = Polygon(outline)
+                        if poly.is_valid:
+                            all_polygons.append(poly)
+                        else:
+                            # 尝试修复无效多边形
+                            poly = poly.buffer(0)
+                            if poly.is_valid and not poly.is_empty:
+                                all_polygons.append(poly)
+                    except:
+                        pass
+
+            # 添加IR焊盘
+            for pad in ir_pads:
+                if len(pad) >= 3:
+                    try:
+                        poly = Polygon(pad)
+                        if poly.is_valid:
+                            all_polygons.append(poly)
+                        else:
+                            poly = poly.buffer(0)
+                            if poly.is_valid and not poly.is_empty:
+                                all_polygons.append(poly)
+                    except:
+                        pass
+
+            # 添加中心焊盘
+            if center_pad is not None and len(center_pad) >= 3:
+                try:
+                    poly = Polygon(center_pad)
+                    if poly.is_valid:
+                        all_polygons.append(poly)
+                    else:
+                        poly = poly.buffer(0)
+                        if poly.is_valid and not poly.is_empty:
+                            all_polygons.append(poly)
+                except:
+                    pass
+
+            if not all_polygons:
+                print("没有有效的轮廓可导出")
+                return False
+
+            # 使用布尔并集合并所有多边形
+            merged = unary_union(all_polygons)
+
+            # 创建DXF文档
+            doc = ezdxf.new(dxfversion='R2010')
+            msp = doc.modelspace()
+
+            # 设置单位为毫米
+            doc.header['$INSUNITS'] = 4
+            doc.header['$MEASUREMENT'] = 1
+
+            # 创建图层
+            doc.layers.add('OUTLINE', color=7)  # 白色 - 轮廓
+
+            def add_polygon_to_dxf(poly, layer='OUTLINE'):
+                """将shapely多边形添加到DXF"""
+                if poly.is_empty:
+                    return
+
+                # 外轮廓
+                exterior_coords = list(poly.exterior.coords)
+                if len(exterior_coords) >= 3:
+                    points = [(p[0] * scale, p[1] * scale) for p in exterior_coords]
+                    msp.add_lwpolyline(
+                        points,
+                        close=True,
+                        dxfattribs={'layer': layer, 'lineweight': 50}
+                    )
+
+                # 内部孔洞（如果有）
+                for interior in poly.interiors:
+                    interior_coords = list(interior.coords)
+                    if len(interior_coords) >= 3:
+                        points = [(p[0] * scale, p[1] * scale) for p in interior_coords]
+                        msp.add_lwpolyline(
+                            points,
+                            close=True,
+                            dxfattribs={'layer': layer}
+                        )
+
+            # 处理合并结果
+            if merged.geom_type == 'Polygon':
+                add_polygon_to_dxf(merged)
+            elif merged.geom_type == 'MultiPolygon':
+                for poly in merged.geoms:
+                    add_polygon_to_dxf(poly)
+            else:
+                print(f"不支持的几何类型: {merged.geom_type}")
+                return False
+
+            doc.saveas(filepath)
+            print(f"已导出单一轮廓DXF: {filepath}")
+            return True
+
+        except ImportError:
+            print("需要shapely库来合并轮廓，请安装: pip install shapely")
+            return False
+        except Exception as e:
+            print(f"导出单一轮廓DXF失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    @staticmethod
     def export_fpc_svg(
         groove_outlines: List[np.ndarray],
         ir_pads: List[np.ndarray],
