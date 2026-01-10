@@ -4,7 +4,7 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 from PyQt5.QtWidgets import QWidget, QVBoxLayout
 from PyQt5.QtCore import pyqtSignal, QObject
-from typing import Optional, List, Tuple, Callable
+from typing import Optional, List, Tuple, Callable, Dict
 import trimesh
 import logging
 import os
@@ -31,6 +31,14 @@ class PickerCallback(QObject):
     ir_point_selected = pyqtSignal(str)  # 选中的IR点ID
     # 路径编辑信号
     path_edit_points_changed = pyqtSignal(list)  # 路径编辑选中的点列表变化 [point_id, ...]
+    # 拖动信号（用于DXF导入模式）
+    point_drag_started = pyqtSignal(str)  # 开始拖动点
+    point_dragging = pyqtSignal(str, object)  # 拖动中 (point_id, position)
+    point_drag_ended = pyqtSignal(str, object)  # 拖动结束 (point_id, position)
+    # 方向拖动信号（按D键）
+    direction_drag_started = pyqtSignal()  # 开始方向拖动
+    direction_dragging = pyqtSignal(float)  # 方向拖动中 (angle_delta in degrees)
+    direction_drag_ended = pyqtSignal()  # 方向拖动结束
 
 
 class Viewer3D(QWidget):
@@ -59,6 +67,12 @@ class Viewer3D(QWidget):
 
         # 路径编辑多选（Ctrl+点击）
         self.path_edit_selected_points: List[str] = []  # 选中的点ID列表（最多2个）
+
+        # 拖动模式（用于DXF导入）
+        self.drag_mode_enabled = False  # 是否启用拖动模式
+        self.dragging_point_id: Optional[str] = None  # 正在拖动的点ID
+        self.drag_start_position: Optional[np.ndarray] = None  # 拖动开始位置
+        self.drag_key_pressed: Optional[str] = None  # 当前按下的拖动键 ('m' 或 'd')
 
         # 拾取回调
         self.picker_callback = PickerCallback()
@@ -1115,3 +1129,312 @@ class Viewer3D(QWidget):
         except:
             pass
         self.plotter.render()
+
+    # ==================== 拖动模式（DXF导入） ====================
+
+    def set_drag_mode(self, enabled: bool, draggable_point_id: Optional[str] = None):
+        """
+        设置拖动模式
+
+        Args:
+            enabled: 是否启用拖动模式
+            draggable_point_id: 可拖动的点ID（如果为None则所有点都可拖动）
+        """
+        self.drag_mode_enabled = enabled
+        self._draggable_point_id = draggable_point_id if enabled else None
+
+        if enabled:
+            self._setup_drag_observers()
+        else:
+            self._remove_drag_observers()
+            self.dragging_point_id = None
+            self.drag_start_position = None
+            self.drag_key_pressed = None
+
+    def _setup_drag_observers(self):
+        """设置拖动事件监听"""
+        try:
+            iren = self.plotter.iren.interactor
+
+            # 移除旧的观察者（如果有）
+            self._remove_drag_observers()
+
+            # 添加事件观察者
+            self._drag_observer_ids = []
+
+            # 键盘和鼠标事件
+            def on_key_press(obj, event):
+                self._on_drag_key_press(obj)
+
+            def on_key_release(obj, event):
+                self._on_drag_key_release(obj)
+
+            def on_left_button_press(obj, event):
+                self._on_drag_start(obj)
+
+            def on_mouse_move(obj, event):
+                self._on_drag_move(obj)
+
+            def on_left_button_release(obj, event):
+                self._on_drag_end(obj)
+
+            self._drag_observer_ids.append(
+                iren.AddObserver('KeyPressEvent', on_key_press)
+            )
+            self._drag_observer_ids.append(
+                iren.AddObserver('KeyReleaseEvent', on_key_release)
+            )
+            self._drag_observer_ids.append(
+                iren.AddObserver('LeftButtonPressEvent', on_left_button_press)
+            )
+            self._drag_observer_ids.append(
+                iren.AddObserver('MouseMoveEvent', on_mouse_move)
+            )
+            self._drag_observer_ids.append(
+                iren.AddObserver('LeftButtonReleaseEvent', on_left_button_release)
+            )
+        except Exception as e:
+            print(f"设置拖动观察者失败: {e}")
+
+    def _remove_drag_observers(self):
+        """移除拖动事件监听"""
+        if hasattr(self, '_drag_observer_ids'):
+            try:
+                iren = self.plotter.iren.interactor
+                for observer_id in self._drag_observer_ids:
+                    iren.RemoveObserver(observer_id)
+            except:
+                pass
+            self._drag_observer_ids = []
+
+    def _on_drag_key_press(self, interactor):
+        """键盘按下事件"""
+        if not self.drag_mode_enabled:
+            return
+
+        key = interactor.GetKeySym()
+        if key and key.lower() in ('m', 'd'):
+            self.drag_key_pressed = key.lower()
+            # 记录按键开始时的鼠标位置（用于D键旋转计算）
+            self._drag_start_mouse_pos = interactor.GetEventPosition()
+
+    def _on_drag_key_release(self, interactor):
+        """键盘释放事件"""
+        key = interactor.GetKeySym()
+        if key and key.lower() == self.drag_key_pressed:
+            # 结束拖动
+            if self.dragging_point_id:
+                self._on_drag_end(interactor)
+            self.drag_key_pressed = None
+
+    def _on_drag_start(self, interactor):
+        """鼠标按下事件 - 开始拖动"""
+        if not self.drag_mode_enabled:
+            return
+
+        # 必须按住M或D键才能拖动
+        if self.drag_key_pressed not in ('m', 'd'):
+            return
+
+        click_pos = interactor.GetEventPosition()
+
+        if self.drag_key_pressed == 'm':
+            # M键：移动点位置
+            clicked_point_id = self._find_point_at_screen_position(click_pos)
+
+            if clicked_point_id:
+                # 检查是否是允许拖动的点
+                if hasattr(self, '_draggable_point_id') and self._draggable_point_id:
+                    if clicked_point_id != self._draggable_point_id:
+                        return
+
+                self.dragging_point_id = clicked_point_id
+                self.drag_start_position = self.ir_point_positions.get(clicked_point_id)
+
+                # 发送拖动开始信号
+                self.picker_callback.point_drag_started.emit(clicked_point_id)
+
+                # 高亮拖动点
+                self._update_ir_point_color_custom(clicked_point_id, '#ff00ff')  # 紫色
+
+        elif self.drag_key_pressed == 'd':
+            # D键：旋转方向
+            self._drag_start_mouse_pos = click_pos
+            self._direction_dragging = True
+            self.picker_callback.direction_drag_started.emit()
+
+    def _on_drag_move(self, interactor):
+        """鼠标移动事件 - 拖动中"""
+        if not self.drag_mode_enabled:
+            return
+
+        if self.drag_key_pressed == 'm' and self.dragging_point_id:
+            # M键：移动点位置
+            if self.mesh is None:
+                return
+
+            mouse_pos = interactor.GetEventPosition()
+            surface_point = self._screen_to_surface_point(mouse_pos)
+
+            if surface_point is not None:
+                self.ir_point_positions[self.dragging_point_id] = surface_point
+                self._update_ir_point_color_custom(self.dragging_point_id, '#ff00ff')
+
+                self.picker_callback.point_dragging.emit(
+                    self.dragging_point_id,
+                    surface_point
+                )
+
+        elif self.drag_key_pressed == 'd' and hasattr(self, '_direction_dragging') and self._direction_dragging:
+            # D键：旋转方向
+            mouse_pos = interactor.GetEventPosition()
+            start_pos = self._drag_start_mouse_pos
+
+            # 计算水平移动的角度变化（每像素1度）
+            delta_x = mouse_pos[0] - start_pos[0]
+            angle_delta = delta_x * 0.5  # 每像素0.5度
+
+            self.picker_callback.direction_dragging.emit(angle_delta)
+
+    def _on_drag_end(self, interactor):
+        """鼠标释放事件 - 拖动结束"""
+        if not self.drag_mode_enabled:
+            return
+
+        if self.drag_key_pressed == 'm' and self.dragging_point_id:
+            point_id = self.dragging_point_id
+            final_position = self.ir_point_positions.get(point_id)
+
+            # 恢复点的颜色
+            is_center = self.ir_point_is_center.get(point_id, False)
+            self._update_ir_point_color(point_id, is_center, selected=False)
+
+            if final_position is not None:
+                self.picker_callback.point_drag_ended.emit(point_id, final_position)
+
+            self.dragging_point_id = None
+
+        elif self.drag_key_pressed == 'd' and hasattr(self, '_direction_dragging') and self._direction_dragging:
+            self._direction_dragging = False
+            self.picker_callback.direction_drag_ended.emit()
+
+    def _find_point_at_screen_position(self, screen_pos) -> Optional[str]:
+        """在屏幕位置查找IR点"""
+        if not self.ir_point_positions:
+            return None
+
+        # 将屏幕坐标转换为世界坐标
+        try:
+            renderer = self.plotter.renderer
+            coordinate = vtk.vtkCoordinate()
+            coordinate.SetCoordinateSystemToDisplay()
+            coordinate.SetValue(float(screen_pos[0]), float(screen_pos[1]), 0.0)
+            world_point = np.array(coordinate.GetComputedWorldValue(renderer))
+
+            camera_pos = np.array(self.plotter.camera_position[0])
+
+            # 计算点击阈值
+            if self.mesh is not None:
+                bounds = self.mesh.bounds
+                size = np.linalg.norm(bounds[1] - bounds[0])
+                threshold = size * 0.05
+            else:
+                threshold = 2.0
+
+            # 查找最近的点
+            min_dist = float('inf')
+            closest_id = None
+
+            for point_id, pos in self.ir_point_positions.items():
+                # 将3D点投影到屏幕
+                coord = vtk.vtkCoordinate()
+                coord.SetCoordinateSystemToWorld()
+                coord.SetValue(pos[0], pos[1], pos[2])
+                screen_point = coord.GetComputedDisplayValue(renderer)
+
+                if screen_point:
+                    dist = np.sqrt(
+                        (screen_point[0] - screen_pos[0]) ** 2 +
+                        (screen_point[1] - screen_pos[1]) ** 2
+                    )
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_id = point_id
+
+            # 屏幕距离阈值（像素）
+            screen_threshold = 20
+            if min_dist < screen_threshold:
+                return closest_id
+
+        except Exception as e:
+            print(f"查找点失败: {e}")
+
+        return None
+
+    def _screen_to_surface_point(self, screen_pos) -> Optional[np.ndarray]:
+        """将屏幕坐标转换为曲面上的点"""
+        if self.mesh is None:
+            return None
+
+        try:
+            renderer = self.plotter.renderer
+            camera_pos = np.array(self.plotter.camera_position[0])
+
+            # 使用VTK坐标转换
+            coordinate = vtk.vtkCoordinate()
+            coordinate.SetCoordinateSystemToDisplay()
+            coordinate.SetValue(float(screen_pos[0]), float(screen_pos[1]), 0.0)
+            world_near = np.array(coordinate.GetComputedWorldValue(renderer))
+
+            coordinate.SetValue(float(screen_pos[0]), float(screen_pos[1]), 1.0)
+            world_far = np.array(coordinate.GetComputedWorldValue(renderer))
+
+            # 计算射线方向
+            ray_direction = world_far - world_near
+            ray_length = np.linalg.norm(ray_direction)
+            if ray_length < 1e-10:
+                return None
+            ray_direction = ray_direction / ray_length
+
+            # 射线-网格相交
+            locations, _, _ = self.mesh.ray.intersects_location(
+                ray_origins=[camera_pos],
+                ray_directions=[ray_direction]
+            )
+
+            if len(locations) == 0:
+                # 尝试从近平面发射
+                locations, _, _ = self.mesh.ray.intersects_location(
+                    ray_origins=[world_near],
+                    ray_directions=[ray_direction]
+                )
+
+            if len(locations) == 0:
+                return None
+
+            # 找到离相机最近的交点
+            distances = np.linalg.norm(locations - camera_pos, axis=1)
+            nearest_idx = np.argmin(distances)
+
+            return locations[nearest_idx].copy()
+
+        except Exception as e:
+            print(f"屏幕到曲面转换失败: {e}")
+            return None
+
+    def update_multiple_ir_points(self, points: Dict[str, np.ndarray]):
+        """
+        批量更新多个IR点的位置
+
+        Args:
+            points: {point_id -> 3D位置} 的字典
+        """
+        for point_id, position in points.items():
+            if point_id in self.ir_point_positions:
+                self.ir_point_positions[point_id] = position.copy()
+                is_center = self.ir_point_is_center.get(point_id, False)
+                selected = (self.selected_ir_point_id == point_id)
+                self._update_ir_point_color(point_id, is_center, selected)
+
+        self.plotter.render()
+

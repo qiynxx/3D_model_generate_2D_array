@@ -5,7 +5,8 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
     QMenuBar, QMenu, QAction, QFileDialog, QMessageBox, QStatusBar,
-    QTabWidget, QLabel, QInputDialog
+    QTabWidget, QLabel, QInputDialog, QSlider, QGroupBox, QDoubleSpinBox,
+    QPushButton, QFrame
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QKeySequence
@@ -28,6 +29,7 @@ from core.path_flatten import (
     FPCFittingAnimator
 )
 from core.exporter import Exporter, BatchExporter, ProjectSnapshot, FolderExporter
+from core.dxf_importer import DXFImporter, DXFImportManager, DXFImportResult
 
 
 class MainWindow(QMainWindow):
@@ -54,6 +56,11 @@ class MainWindow(QMainWindow):
 
         # 路径模式
         self.path_mode = PathMode.STAR.value  # 默认星形连接
+
+        # DXF导入相关
+        self.dxf_import_manager: Optional[DXFImportManager] = None
+        self.dxf_import_mode = False  # 是否处于DXF导入模式
+        self.dxf_reference_point_id: Optional[str] = None  # 导入的参考点ID
 
         self._setup_ui()
         self._setup_menu()
@@ -119,6 +126,11 @@ class MainWindow(QMainWindow):
         self.param_panel = ParamPanel()
         right_layout.addWidget(self.param_panel)
 
+        # DXF导入参数面板（默认隐藏）
+        self.dxf_import_panel = self._create_dxf_import_panel()
+        right_layout.addWidget(self.dxf_import_panel)
+        self.dxf_import_panel.hide()
+
         splitter.addWidget(right_panel)
 
         # 设置分割比例
@@ -128,6 +140,122 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪 - 请加载3D模型")
+
+    def _create_dxf_import_panel(self) -> QGroupBox:
+        """创建DXF导入参数面板"""
+        group = QGroupBox("FPC导入调整")
+        layout = QVBoxLayout(group)
+
+        # 说明标签
+        info_label = QLabel("M键+拖动移动 | D键+拖动旋转")
+        info_label.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(info_label)
+
+        # 分隔线
+        line1 = QFrame()
+        line1.setFrameShape(QFrame.HLine)
+        line1.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line1)
+
+        # X偏移滑块
+        x_layout = QHBoxLayout()
+        x_label = QLabel("X偏移:")
+        x_label.setFixedWidth(50)
+        x_layout.addWidget(x_label)
+
+        self.dxf_x_slider = QSlider(Qt.Horizontal)
+        self.dxf_x_slider.setRange(-100, 100)  # -100到100，映射到实际偏移
+        self.dxf_x_slider.setValue(0)
+        self.dxf_x_slider.valueChanged.connect(self._on_dxf_x_offset_changed)
+        x_layout.addWidget(self.dxf_x_slider)
+
+        self.dxf_x_spin = QDoubleSpinBox()
+        self.dxf_x_spin.setRange(-50.0, 50.0)
+        self.dxf_x_spin.setValue(0.0)
+        self.dxf_x_spin.setSuffix(" mm")
+        self.dxf_x_spin.setFixedWidth(80)
+        self.dxf_x_spin.valueChanged.connect(self._on_dxf_x_spin_changed)
+        x_layout.addWidget(self.dxf_x_spin)
+
+        layout.addLayout(x_layout)
+
+        # Y偏移滑块
+        y_layout = QHBoxLayout()
+        y_label = QLabel("Y偏移:")
+        y_label.setFixedWidth(50)
+        y_layout.addWidget(y_label)
+
+        self.dxf_y_slider = QSlider(Qt.Horizontal)
+        self.dxf_y_slider.setRange(-100, 100)
+        self.dxf_y_slider.setValue(0)
+        self.dxf_y_slider.valueChanged.connect(self._on_dxf_y_offset_changed)
+        y_layout.addWidget(self.dxf_y_slider)
+
+        self.dxf_y_spin = QDoubleSpinBox()
+        self.dxf_y_spin.setRange(-50.0, 50.0)
+        self.dxf_y_spin.setValue(0.0)
+        self.dxf_y_spin.setSuffix(" mm")
+        self.dxf_y_spin.setFixedWidth(80)
+        self.dxf_y_spin.valueChanged.connect(self._on_dxf_y_spin_changed)
+        y_layout.addWidget(self.dxf_y_spin)
+
+        layout.addLayout(y_layout)
+
+        # 分隔线
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.HLine)
+        line2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line2)
+
+        # 方向旋转滑块（-60到60度）
+        rot_layout = QHBoxLayout()
+        rot_label = QLabel("旋转:")
+        rot_label.setFixedWidth(50)
+        rot_layout.addWidget(rot_label)
+
+        self.dxf_rotation_slider = QSlider(Qt.Horizontal)
+        self.dxf_rotation_slider.setRange(-60, 60)  # -60到60度
+        self.dxf_rotation_slider.setValue(0)
+        self.dxf_rotation_slider.valueChanged.connect(self._on_dxf_rotation_changed)
+        rot_layout.addWidget(self.dxf_rotation_slider)
+
+        self.dxf_rotation_spin = QDoubleSpinBox()
+        self.dxf_rotation_spin.setRange(-60.0, 60.0)
+        self.dxf_rotation_spin.setValue(0.0)
+        self.dxf_rotation_spin.setSuffix("°")
+        self.dxf_rotation_spin.setFixedWidth(80)
+        self.dxf_rotation_spin.valueChanged.connect(self._on_dxf_rotation_spin_changed)
+        rot_layout.addWidget(self.dxf_rotation_spin)
+
+        layout.addLayout(rot_layout)
+
+        # 分隔线
+        line3 = QFrame()
+        line3.setFrameShape(QFrame.HLine)
+        line3.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(line3)
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+
+        self.dxf_confirm_btn = QPushButton("确认导入")
+        self.dxf_confirm_btn.setStyleSheet("background-color: #27ae60; color: white;")
+        self.dxf_confirm_btn.clicked.connect(self._on_dxf_confirm_clicked)
+        btn_layout.addWidget(self.dxf_confirm_btn)
+
+        self.dxf_cancel_btn = QPushButton("取消")
+        self.dxf_cancel_btn.setStyleSheet("background-color: #c0392b; color: white;")
+        self.dxf_cancel_btn.clicked.connect(self._on_dxf_cancel_clicked)
+        btn_layout.addWidget(self.dxf_cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+        # 重置按钮
+        self.dxf_reset_btn = QPushButton("重置参数")
+        self.dxf_reset_btn.clicked.connect(self._on_dxf_reset_clicked)
+        layout.addWidget(self.dxf_reset_btn)
+
+        return group
 
     def _setup_menu(self):
         """设置菜单"""
@@ -140,6 +268,12 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.Open)
         open_action.triggered.connect(self._on_open_model)
         file_menu.addAction(open_action)
+
+        # 导入FPC DXF
+        import_dxf = QAction("导入FPC DXF(&I)...", self)
+        import_dxf.setShortcut("Ctrl+I")
+        import_dxf.triggered.connect(self._on_import_fpc_dxf)
+        file_menu.addAction(import_dxf)
 
         file_menu.addSeparator()
 
@@ -203,6 +337,14 @@ class MainWindow(QMainWindow):
         self.viewer_3d.picker_callback.point_picked.connect(self._on_point_picked)
         self.viewer_3d.picker_callback.ir_point_selected.connect(self._on_ir_point_selected_3d)
         self.viewer_3d.picker_callback.path_edit_points_changed.connect(self._on_path_edit_points_changed)
+        # 拖动信号（DXF导入模式）
+        self.viewer_3d.picker_callback.point_drag_started.connect(self._on_dxf_import_drag_started)
+        self.viewer_3d.picker_callback.point_dragging.connect(self._on_dxf_import_dragging)
+        self.viewer_3d.picker_callback.point_drag_ended.connect(self._on_dxf_import_drag_ended)
+        # 方向拖动信号
+        self.viewer_3d.picker_callback.direction_drag_started.connect(self._on_dxf_direction_drag_started)
+        self.viewer_3d.picker_callback.direction_dragging.connect(self._on_dxf_direction_dragging)
+        self.viewer_3d.picker_callback.direction_drag_ended.connect(self._on_dxf_direction_drag_ended)
 
         # 点位面板
         self.point_panel.picking_toggled.connect(self._on_picking_toggled)
@@ -292,6 +434,11 @@ class MainWindow(QMainWindow):
 
     def _on_point_picked(self, position: np.ndarray, face_index: int):
         """点被拾取"""
+        # 检查是否在DXF导入模式
+        if self.dxf_import_mode:
+            if self._on_point_picked_in_import_mode(position, face_index):
+                return
+
         if self.path_manager is None:
             return
 
@@ -2173,3 +2320,507 @@ class MainWindow(QMainWindow):
             segment_key = f"serial_seg_{i}"
             self.viewer_3d.add_path(segment_path, segment_key, color='blue')
             print(f"[_refresh_serial_path_display] 显示段 {i}: {from_id} -> {to_id}, 点数: {len(segment_path)}")
+
+    # ==================== DXF导入功能 ====================
+
+    def _on_import_fpc_dxf(self):
+        """导入FPC DXF文件"""
+        if self.mesh is None:
+            QMessageBox.warning(self, "警告", "请先加载3D模型")
+            return
+
+        # 选择DXF文件
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "导入FPC DXF",
+            "",
+            "DXF文件 (*.dxf);;所有文件 (*)"
+        )
+
+        if not filepath:
+            return
+
+        # 创建导入管理器
+        self.dxf_import_manager = DXFImportManager(self.mesh, self)
+        self.dxf_import_manager.status_message.connect(self._on_dxf_import_status)
+        self.dxf_import_manager.points_updated.connect(self._on_dxf_points_updated)
+        self.dxf_import_manager.import_completed.connect(self._on_dxf_import_completed)
+        self.dxf_import_manager.import_cancelled.connect(self._on_dxf_import_cancelled)
+
+        # 加载DXF
+        if not self.dxf_import_manager.load_dxf(filepath):
+            QMessageBox.critical(self, "错误", "无法解析DXF文件")
+            self.dxf_import_manager = None
+            return
+
+        # 进入导入模式
+        self._enter_dxf_import_mode()
+
+    def _enter_dxf_import_mode(self):
+        """进入DXF导入模式"""
+        self.dxf_import_mode = True
+
+        # 清除现有点
+        if self.path_manager:
+            for point_id in list(self.path_manager.ir_points.keys()):
+                self.path_manager.remove_point(point_id)
+        self.point_panel.clear_all()
+        self.viewer_3d.clear_all()
+        self.viewer_3d.load_mesh(self.mesh)  # 重新加载网格
+
+        # 显示DXF导入参数面板并重置参数
+        self._reset_dxf_import_sliders()
+        self.dxf_import_panel.show()
+
+        # 更新状态
+        point_count = self.dxf_import_manager.get_point_count()
+        self.status_bar.showMessage(
+            f"DXF导入模式 - 已加载 {point_count} 个点 | "
+            f"请点击模型表面放置参考点（中心点）"
+        )
+
+        # 启用拾取模式（用于放置参考点）
+        self.viewer_3d.set_picking_enabled(True)
+
+    def _on_point_picked_in_import_mode(self, position: np.ndarray, face_index: int):
+        """DXF导入模式下的点拾取处理"""
+        if not self.dxf_import_mode or self.dxf_import_manager is None:
+            return False
+
+        # 如果还没有放置参考点
+        if self.dxf_reference_point_id is None:
+            # 计算所有点的位置
+            points_3d = self.dxf_import_manager.set_reference_point(position)
+
+            # 创建所有IR点
+            self._create_imported_points(points_3d)
+
+            # 禁用普通拾取，启用拖动模式
+            self.viewer_3d.set_picking_enabled(False)
+            self.viewer_3d.set_drag_mode(True, self.dxf_reference_point_id)
+
+            self.status_bar.showMessage(
+                f"已放置参考点 | M键+拖动移动点，D键+拖动旋转方向 | "
+                f"按ESC取消，按Enter确认"
+            )
+            return True
+
+        return False
+
+    def _create_imported_points(self, points_3d: dict):
+        """创建导入的IR点"""
+        if self.path_manager is None:
+            self.path_manager = PathManager(self.mesh)
+
+        # 找到中心点
+        center_label = self.dxf_import_manager.reference_label
+
+        for label, position in points_3d.items():
+            is_center = (label == center_label)
+
+            # 获取面索引
+            try:
+                _, _, face_idx = self.mesh.nearest.on_surface([position])
+                face_index = int(face_idx[0])
+            except:
+                face_index = 0
+
+            # 添加到路径管理器
+            point = self.path_manager.add_point(
+                position=position,
+                face_index=face_index,
+                is_center=is_center,
+                name=label
+            )
+
+            if is_center:
+                self.dxf_reference_point_id = point.id
+
+            # 更新UI
+            self.point_panel.add_point(
+                point_id=point.id,
+                position=position,
+                name=label
+            )
+
+            if is_center:
+                self.point_panel.set_center_point(point.id)
+
+            # 更新3D显示
+            self.viewer_3d.add_ir_point(
+                point_id=point.id,
+                position=position,
+                is_center=is_center,
+                name=label
+            )
+
+        # 更新坐标面板
+        self._sync_points_to_coord_panel()
+
+        # 显示初始路径
+        self._update_dxf_import_paths(points_3d)
+
+    def _on_dxf_import_drag_started(self, point_id: str):
+        """DXF导入拖动开始"""
+        if not self.dxf_import_mode:
+            return
+        self.status_bar.showMessage(f"正在拖动参考点...")
+
+    def _on_dxf_import_dragging(self, point_id: str, position):
+        """DXF导入拖动中"""
+        if not self.dxf_import_mode or self.dxf_import_manager is None:
+            return
+
+        if not isinstance(position, np.ndarray):
+            position = np.array(position)
+
+        # 更新导入管理器（带节流）
+        self.dxf_import_manager.update_reference_point(position)
+
+    def _on_dxf_import_drag_ended(self, point_id: str, position):
+        """DXF导入拖动结束"""
+        if not self.dxf_import_mode:
+            return
+
+        # 拖动位置后重置偏移滑块（因为参考点位置已经改变）
+        self.dxf_x_slider.blockSignals(True)
+        self.dxf_x_spin.blockSignals(True)
+        self.dxf_y_slider.blockSignals(True)
+        self.dxf_y_spin.blockSignals(True)
+        self.dxf_x_slider.setValue(0)
+        self.dxf_x_spin.setValue(0.0)
+        self.dxf_y_slider.setValue(0)
+        self.dxf_y_spin.setValue(0.0)
+        self.dxf_x_slider.blockSignals(False)
+        self.dxf_x_spin.blockSignals(False)
+        self.dxf_y_slider.blockSignals(False)
+        self.dxf_y_spin.blockSignals(False)
+
+        # 重置导入管理器中的偏移值
+        if self.dxf_import_manager:
+            self.dxf_import_manager.offset_2d = np.zeros(2)
+
+        self.status_bar.showMessage(
+            f"参考点已更新 | M键+拖动移动点，D键+拖动旋转方向 | "
+            f"按ESC取消，按Enter确认"
+        )
+
+    def _on_dxf_direction_drag_started(self):
+        """DXF方向拖动开始"""
+        if not self.dxf_import_mode:
+            return
+        self._dxf_initial_rotation = self.dxf_import_manager.rotation_angle if self.dxf_import_manager else 0
+        self.status_bar.showMessage("正在旋转方向...")
+
+    def _on_dxf_direction_dragging(self, angle_delta: float):
+        """DXF方向拖动中"""
+        if not self.dxf_import_mode or self.dxf_import_manager is None:
+            return
+
+        # 设置新的旋转角度（弧度）
+        new_angle_rad = getattr(self, '_dxf_initial_rotation', 0) + angle_delta
+        new_angle_deg = np.degrees(new_angle_rad)
+
+        # 限制在-60到60度范围内
+        new_angle_deg = max(-60, min(60, new_angle_deg))
+
+        # 同步滑块显示
+        self.dxf_rotation_slider.blockSignals(True)
+        self.dxf_rotation_spin.blockSignals(True)
+        self.dxf_rotation_slider.setValue(int(new_angle_deg))
+        self.dxf_rotation_spin.setValue(new_angle_deg)
+        self.dxf_rotation_slider.blockSignals(False)
+        self.dxf_rotation_spin.blockSignals(False)
+
+        # 应用旋转
+        self.dxf_import_manager.set_rotation(new_angle_deg)
+
+    def _on_dxf_direction_drag_ended(self):
+        """DXF方向拖动结束"""
+        if not self.dxf_import_mode:
+            return
+
+        self.status_bar.showMessage(
+            f"方向已更新 | M键+拖动移动点，D键+拖动旋转方向 | "
+            f"按ESC取消，按Enter确认"
+        )
+
+    def _on_dxf_points_updated(self, points_3d: dict):
+        """DXF导入点位置更新"""
+        if not self.dxf_import_mode:
+            return
+
+        # 更新PathManager中的点位置
+        if self.path_manager:
+            for label, position in points_3d.items():
+                # 找到对应的点ID
+                for point_id, point in self.path_manager.ir_points.items():
+                    if point.name == label:
+                        point.position = position.copy()
+                        # 更新面索引
+                        try:
+                            _, _, face_idx = self.mesh.nearest.on_surface([position])
+                            point.face_index = int(face_idx[0])
+                        except:
+                            pass
+                        break
+
+        # 批量更新3D视图
+        point_positions = {}
+        for label, position in points_3d.items():
+            for point_id, point in self.path_manager.ir_points.items():
+                if point.name == label:
+                    point_positions[point_id] = position
+                    break
+
+        self.viewer_3d.update_multiple_ir_points(point_positions)
+
+        # 更新坐标面板
+        self._sync_points_to_coord_panel()
+
+        # 更新路径显示
+        self._update_dxf_import_paths(points_3d)
+
+    def _on_dxf_import_status(self, message: str):
+        """DXF导入状态消息"""
+        self.status_bar.showMessage(message)
+
+    def _on_dxf_import_completed(self):
+        """DXF导入完成"""
+        self._exit_dxf_import_mode(confirmed=True)
+
+    def _on_dxf_import_cancelled(self):
+        """DXF导入取消"""
+        self._exit_dxf_import_mode(confirmed=False)
+
+    def _exit_dxf_import_mode(self, confirmed: bool = False):
+        """退出DXF导入模式"""
+        self.dxf_import_mode = False
+
+        # 禁用拖动模式
+        self.viewer_3d.set_drag_mode(False)
+
+        # 隐藏DXF导入参数面板
+        self.dxf_import_panel.hide()
+
+        # 清除导入预览路径
+        self.viewer_3d.clear_paths()
+
+        if confirmed:
+            # 确保中心点正确设置到PathManager
+            if self.dxf_reference_point_id and self.path_manager:
+                self.path_manager.set_center_point(self.dxf_reference_point_id)
+                print(f"设置中心点: {self.dxf_reference_point_id}")
+
+            # 自动生成路径
+            self._on_generate_paths()
+
+            self.status_bar.showMessage(
+                f"DXF导入完成 - 已导入 {len(self.path_manager.ir_points)} 个点，路径已生成"
+            )
+        else:
+            # 取消导入，清除点
+            if self.path_manager:
+                for point_id in list(self.path_manager.ir_points.keys()):
+                    self.path_manager.remove_point(point_id)
+            self.point_panel.clear_all()
+            self.viewer_3d.clear_all()
+            self.viewer_3d.load_mesh(self.mesh)
+            self.status_bar.showMessage("DXF导入已取消")
+
+        # 清理
+        self.dxf_import_manager = None
+        self.dxf_reference_point_id = None
+
+    def keyPressEvent(self, event):
+        """键盘事件处理"""
+        if self.dxf_import_mode:
+            if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+                # 确认导入
+                if self.dxf_import_manager:
+                    self.dxf_import_manager.finalize_import()
+                return
+            elif event.key() == Qt.Key_Escape:
+                # 取消导入
+                if self.dxf_import_manager:
+                    self.dxf_import_manager.cancel_import()
+                return
+
+        super().keyPressEvent(event)
+
+    def _update_dxf_import_paths(self, points_3d: dict):
+        """更新DXF导入的路径显示（优化版本，使用简单直线提升性能）"""
+        if not self.dxf_import_mode or self.dxf_import_manager is None:
+            return
+
+        # 清除旧路径
+        self.viewer_3d.clear_paths()
+
+        # 获取中心点位置
+        center_label = self.dxf_import_manager.reference_label
+        center_pos = points_3d.get(center_label)
+        if center_pos is None:
+            return
+
+        # 为每个IR点绘制从中心点到该点的路径（星形模式）
+        for label, position in points_3d.items():
+            if label == center_label:
+                continue
+
+            # 使用简单的3点路径（起点、中点投影、终点）提升性能
+            path_points = self._create_simple_path(center_pos, position)
+            if path_points is not None and len(path_points) >= 2:
+                self.viewer_3d.add_path(
+                    path_points,
+                    path_id=f"import_{label}",
+                    color='#f39c12',  # 橙色
+                    width=2.0
+                )
+
+        self.viewer_3d.plotter.render()
+
+    def _create_simple_path(self, start: np.ndarray, end: np.ndarray) -> np.ndarray:
+        """创建简单的路径（性能优先，只做3点投影）"""
+        if self.mesh is None:
+            return np.array([start, end])
+
+        try:
+            # 只计算中点并投影，减少计算量
+            mid = (start + end) / 2
+            mid_projected, _, _ = self.mesh.nearest.on_surface([mid])
+            return np.array([start, mid_projected[0], end])
+        except:
+            return np.array([start, end])
+
+    def _create_surface_path(self, start: np.ndarray, end: np.ndarray, num_points: int = 20) -> np.ndarray:
+        """创建沿曲面的路径（简化版本，使用投影）"""
+        if self.mesh is None:
+            return np.array([start, end])
+
+        try:
+            # 线性插值并投影到曲面
+            t = np.linspace(0, 1, num_points)
+            path = []
+            for ti in t:
+                point = start * (1 - ti) + end * ti
+                # 投影到曲面
+                closest, _, _ = self.mesh.nearest.on_surface([point])
+                path.append(closest[0])
+            return np.array(path)
+        except:
+            return np.array([start, end])
+
+    # ======================= DXF导入参数面板回调函数 =======================
+
+    def _reset_dxf_import_sliders(self):
+        """重置DXF导入滑块到初始值"""
+        # 阻止信号触发
+        self.dxf_x_slider.blockSignals(True)
+        self.dxf_x_spin.blockSignals(True)
+        self.dxf_y_slider.blockSignals(True)
+        self.dxf_y_spin.blockSignals(True)
+        self.dxf_rotation_slider.blockSignals(True)
+        self.dxf_rotation_spin.blockSignals(True)
+
+        # 重置值
+        self.dxf_x_slider.setValue(0)
+        self.dxf_x_spin.setValue(0.0)
+        self.dxf_y_slider.setValue(0)
+        self.dxf_y_spin.setValue(0.0)
+        self.dxf_rotation_slider.setValue(0)
+        self.dxf_rotation_spin.setValue(0.0)
+
+        # 恢复信号
+        self.dxf_x_slider.blockSignals(False)
+        self.dxf_x_spin.blockSignals(False)
+        self.dxf_y_slider.blockSignals(False)
+        self.dxf_y_spin.blockSignals(False)
+        self.dxf_rotation_slider.blockSignals(False)
+        self.dxf_rotation_spin.blockSignals(False)
+
+    def _on_dxf_x_offset_changed(self, value: int):
+        """X偏移滑块变化"""
+        # 滑块范围-100到100，映射到-50到50mm
+        offset_mm = value * 0.5
+        # 同步spinbox
+        self.dxf_x_spin.blockSignals(True)
+        self.dxf_x_spin.setValue(offset_mm)
+        self.dxf_x_spin.blockSignals(False)
+        # 应用偏移
+        self._apply_dxf_offset_rotation()
+
+    def _on_dxf_x_spin_changed(self, value: float):
+        """X偏移spinbox变化"""
+        # 同步slider
+        slider_value = int(value * 2)
+        self.dxf_x_slider.blockSignals(True)
+        self.dxf_x_slider.setValue(slider_value)
+        self.dxf_x_slider.blockSignals(False)
+        # 应用偏移
+        self._apply_dxf_offset_rotation()
+
+    def _on_dxf_y_offset_changed(self, value: int):
+        """Y偏移滑块变化"""
+        offset_mm = value * 0.5
+        self.dxf_y_spin.blockSignals(True)
+        self.dxf_y_spin.setValue(offset_mm)
+        self.dxf_y_spin.blockSignals(False)
+        self._apply_dxf_offset_rotation()
+
+    def _on_dxf_y_spin_changed(self, value: float):
+        """Y偏移spinbox变化"""
+        slider_value = int(value * 2)
+        self.dxf_y_slider.blockSignals(True)
+        self.dxf_y_slider.setValue(slider_value)
+        self.dxf_y_slider.blockSignals(False)
+        self._apply_dxf_offset_rotation()
+
+    def _on_dxf_rotation_changed(self, value: int):
+        """旋转滑块变化"""
+        self.dxf_rotation_spin.blockSignals(True)
+        self.dxf_rotation_spin.setValue(float(value))
+        self.dxf_rotation_spin.blockSignals(False)
+        self._apply_dxf_offset_rotation()
+
+    def _on_dxf_rotation_spin_changed(self, value: float):
+        """旋转spinbox变化"""
+        slider_value = int(value)
+        self.dxf_rotation_slider.blockSignals(True)
+        self.dxf_rotation_slider.setValue(slider_value)
+        self.dxf_rotation_slider.blockSignals(False)
+        self._apply_dxf_offset_rotation()
+
+    def _apply_dxf_offset_rotation(self):
+        """应用当前的偏移和旋转参数"""
+        if not self.dxf_import_mode or self.dxf_import_manager is None:
+            return
+        if self.dxf_reference_point_id is None:
+            return  # 还没放置参考点
+
+        # 获取当前参数
+        x_offset = self.dxf_x_spin.value()
+        y_offset = self.dxf_y_spin.value()
+        rotation = self.dxf_rotation_spin.value()
+
+        # 应用到导入管理器（这会触发points_updated信号，进而更新显示）
+        self.dxf_import_manager.set_offset_2d(x_offset, y_offset)
+        self.dxf_import_manager.set_rotation(rotation)
+
+    def _on_dxf_confirm_clicked(self):
+        """确认导入按钮点击"""
+        if self.dxf_import_manager:
+            self.dxf_import_manager.finalize_import()
+
+    def _on_dxf_cancel_clicked(self):
+        """取消导入按钮点击"""
+        if self.dxf_import_manager:
+            self.dxf_import_manager.cancel_import()
+
+    def _on_dxf_reset_clicked(self):
+        """重置参数按钮点击"""
+        self._reset_dxf_import_sliders()
+        # 重置导入管理器的参数
+        if self.dxf_import_manager:
+            self.dxf_import_manager.set_offset_2d(0.0, 0.0)
+            self.dxf_import_manager.set_rotation(0.0)
+
+
