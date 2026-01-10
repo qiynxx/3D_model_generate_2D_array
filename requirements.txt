@@ -26,5 +26,8 @@ manifold3d>=3.0
 # 文件导出
 ezdxf>=1.1
 
+# 几何运算（轮廓合并）
+shapely>=2.0
+
 # 可视化（用于调试）
 matplotlib>=3.7
