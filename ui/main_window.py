@@ -207,20 +207,20 @@ class MainWindow(QMainWindow):
         line2.setFrameShadow(QFrame.Sunken)
         layout.addWidget(line2)
 
-        # 方向旋转滑块（-60到60度）
+        # 方向旋转滑块（-180到180度，支持360度旋转）
         rot_layout = QHBoxLayout()
         rot_label = QLabel("旋转:")
         rot_label.setFixedWidth(50)
         rot_layout.addWidget(rot_label)
 
         self.dxf_rotation_slider = QSlider(Qt.Horizontal)
-        self.dxf_rotation_slider.setRange(-60, 60)  # -60到60度
+        self.dxf_rotation_slider.setRange(-180, 180)  # -180到180度
         self.dxf_rotation_slider.setValue(0)
         self.dxf_rotation_slider.valueChanged.connect(self._on_dxf_rotation_changed)
         rot_layout.addWidget(self.dxf_rotation_slider)
 
         self.dxf_rotation_spin = QDoubleSpinBox()
-        self.dxf_rotation_spin.setRange(-60.0, 60.0)
+        self.dxf_rotation_spin.setRange(-180.0, 180.0)
         self.dxf_rotation_spin.setValue(0.0)
         self.dxf_rotation_spin.setSuffix("°")
         self.dxf_rotation_spin.setFixedWidth(80)
